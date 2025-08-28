@@ -41,26 +41,22 @@
     ports:
       - "8000:8000"
     environment:
-      # 🔧 FIX: DATABASE_URL más robusto con parámetros de conexión
       - DATABASE_URL=postgresql://loguser:logpass@log_analyzer_db:5432/logs_analyzer
-      # 🔧 FIX: Variables para archivos grandes
       - PYTHONUNBUFFERED=1
       - POLARS_MAX_THREADS=4
+      - POLARS_STREAMING=1  # Habilitar modo streaming
     volumes:
       - ./backend:/app
-      # 🔧 FIX: Volumen temporal más grande para archivos grandes
-      - /tmp:/tmp
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
-    # 🔧 FIX: Aumentar memoria disponible para contenedor
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 8G
         reservations:
-          memory: 1G
+          memory: 4G
 
   frontend:
     build:
