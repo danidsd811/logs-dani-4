@@ -77,54 +77,67 @@ async def init_database():
         """)
 
 # Core processing functions
-def extract_all_fields_and_mappings(config: Dict) -> Tuple[Dict[int, Dict], List[str], List[str]]:
-    """Extract ALL unique fields and create mappings per MessageID"""
-    mappings = {}
+def extract_all_fields_and_mappings(config: Dict) -> Tuple[Dict[int, Dict[int, Tuple[str, int]]], List[str], List[str]]:
+    """
+    Extrae todos los campos únicos y crea mapeos por MessageID.
+    Ahora soporta órdenes no consecutivos: guarda la posición real (index en la lista de EnabledFields)
+    además del order definido en el JSON.
+    """
+    mappings: Dict[int, Dict[int, Tuple[str, int]]] = {}
     all_fields = set()
-    display_order = []  # Order from MessageID 20
-    
+    display_order = []  # Orden de MessageID 20 si existe
+
     for channel in config.get("ChannelsConfiguration", []):
         for msg in channel.get("MessageConfiguration", []):
             msg_id = int(msg.get("MessageId", -1))
             if 1 <= msg_id <= 100 and msg_id not in [30, 99]:
-                fields = {}
-                used_orders = set()  # Track used orders to detect duplicates
-                
-                for field in msg.get("EnabledFields", []):
-                    if field_name := field.get("MessageField", ""):
-                        order = field.get("Order", field.get("DefaultOrder", 9999))
-                        
-                        # If Order is already used, fall back to DefaultOrder
-                        if order in used_orders:
-                            default_order = field.get("DefaultOrder", 9999)
-                            logger.warning(f"MessageID {msg_id}: Order {order} duplicated for {field_name}, using DefaultOrder {default_order}")
-                            order = default_order
-                        
-                        used_orders.add(order)
-                        fields[order] = field_name
-                        all_fields.add(field_name)
-                        
-                        # Capture display order from MessageID 20
-                        if msg_id == 20:
-                            display_order.append((order, field_name))
-                
+                fields: Dict[int, Tuple[str, int]] = {}
+                used_orders = set()
+
+                enabled_fields = msg.get("EnabledFields", [])
+                for position, field in enumerate(enabled_fields):  # posición real en el log
+                    field_name = field.get("MessageField", "")
+                    if not field_name:
+                        continue
+
+                    order = field.get("Order", field.get("DefaultOrder", 9999))
+
+                    # Si se repite el mismo order, usamos la posición real
+                    if order in used_orders:
+                        logger.warning(
+                            f"MessageID {msg_id}: Order {order} duplicado para {field_name}, "
+                            f"usando posición {position}"
+                        )
+                        order = position
+
+                    used_orders.add(order)
+                    fields[order] = (field_name, position)
+                    all_fields.add(field_name)
+
+                    # Capturar display order desde MessageID 20
+                    if msg_id == 20:
+                        display_order.append((order, field_name))
+
                 if fields:
                     mappings[msg_id] = fields
-                    # Log the final mapping for this MessageID
-                    logger.info(f"MessageID {msg_id} mapping: {sorted(fields.items())}")
-    
-    # Sort display order by Order value from MessageID 20
+                    logger.info(
+                        f"MessageID {msg_id} mapping: "
+                        f"{[(o, f, p) for o, (f, p) in sorted(fields.items())]}"
+                    )
+
+    # Ordenar columnas basado en display_order de ID 20
     display_order.sort(key=lambda x: x[0])
     ordered_fields = [field for order, field in display_order]
-    
-    # Add any remaining fields not in MessageID 20
+
+    # Agregar cualquier campo que no estuviera en ID 20
     remaining_fields = sorted(all_fields - set(ordered_fields))
     ordered_fields.extend(remaining_fields)
-    
-    # Final columns: timestamp, message_id + all ordered fields
+
+    # Columnas finales: timestamp, message_id + todos los campos ordenados
     all_columns = ["timestamp", "message_id"] + ordered_fields
-    
+
     return mappings, all_columns, ordered_fields
+
 
 def analyze_log_file_structure(log_path: str) -> Tuple[int, Dict[int, int], int]:
     """🎯 COMPLETE FILE ANALYSIS: Find max columns, MessageID distribution, and sample data"""
@@ -409,9 +422,9 @@ async def process_log_optimized(log_path: str, config: Dict, database_id: str, f
         
         # Check each MessageID configuration
         for msg_id, field_mapping in mappings.items():
-            for order, field_name in field_mapping.items():
+            for order, (field_name, position) in field_mapping.items():
                 if field_name == target_col_name:
-                    source_col_index = order + 2  # +2 for timestamp and message_id
+                    source_col_index = position + 2  # offset por timestamp y message_id
                     source_col = f"f{source_col_index}"
                     
                     # Only map if source column exists in our detected structure
