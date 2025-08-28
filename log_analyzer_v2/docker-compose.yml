@@ -1,0 +1,79 @@
+﻿services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: log_analyzer_db
+    environment:
+      POSTGRES_DB: logs_analyzer
+      POSTGRES_USER: loguser
+      POSTGRES_PASSWORD: logpass
+      # 🔧 FIX: Configuraciones adicionales para asegurar inicialización correcta
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # 🔧 FIX: Comando optimizado para archivos grandes
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c work_mem=32MB
+      -c maintenance_work_mem=256MB
+      -c wal_buffers=16MB
+      -c checkpoint_completion_target=0.9
+      -c synchronous_commit=off
+      -c fsync=off
+      -c full_page_writes=off
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loguser -d logs_analyzer || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    # 🔧 FIX: Asegurar reinicio si hay problemas
+    restart: unless-stopped
+
+  backend:
+    build: 
+      context: ./backend
+    container_name: log_analyzer_backend
+    ports:
+      - "8000:8000"
+    environment:
+      # 🔧 FIX: DATABASE_URL más robusto con parámetros de conexión
+      - DATABASE_URL=postgresql://loguser:logpass@log_analyzer_db:5432/logs_analyzer
+      # 🔧 FIX: Variables para archivos grandes
+      - PYTHONUNBUFFERED=1
+      - POLARS_MAX_THREADS=4
+    volumes:
+      - ./backend:/app
+      # 🔧 FIX: Volumen temporal más grande para archivos grandes
+      - /tmp:/tmp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    # 🔧 FIX: Aumentar memoria disponible para contenedor
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: log_analyzer_frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
