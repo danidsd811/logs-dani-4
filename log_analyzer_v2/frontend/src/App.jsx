@@ -221,16 +221,18 @@ function UploadTab({ onUploadSuccess, uploadStatus }) {
   const [uploading, setUploading] = useState(false);
   const [processingTime, setProcessingTime] = useState(0);
   const [timer, setTimer] = useState(null);
+  const [finalProcessingTime, setFinalProcessingTime] = useState(null);
 
-  // 🔧 FIX: Temporizador optimizado - removido 'timer' de dependencias
+  // Temporizador: actualiza cada 100ms y muestra el tiempo real del backend al finalizar
   useEffect(() => {
+    let startTime;
     if (uploading) {
-      const startTime = Date.now();
+      setFinalProcessingTime(null);
+      startTime = performance.now();
       const interval = setInterval(() => {
-        setProcessingTime((Date.now() - startTime) / 1000);
-      }, 500); // 🔧 FIX: 500ms en lugar de 100ms para mejor performance
+        setProcessingTime((performance.now() - startTime) / 1000);
+      }, 100); // 100ms para décimas de segundo
       setTimer(interval);
-      
       return () => {
         clearInterval(interval);
         setTimer(null);
@@ -241,57 +243,55 @@ function UploadTab({ onUploadSuccess, uploadStatus }) {
         setTimer(null);
       }
     }
-  }, [uploading]); // 🔧 FIX: Removido 'timer' de dependencias
+  }, [uploading]);
 
   // 🚀 FIX CRÍTICO: handleUpload con timeout para archivos de 500MB+
   const handleUpload = async (e) => {
-    e.preventDefault();
-    if (!logFile || !configFile) {
-      alert('Please select both files');
-      return;
-    }
-
-    setUploading(true);
-    setProcessingTime(0);
-
+  e.preventDefault();
+  if (!logFile || !configFile) {
+    alert('Please select both files');
+    return;
+  }
+  setUploading(true);
+  setProcessingTime(0);
+  setFinalProcessingTime(null);
+  
+  const startTime = performance.now(); // ← Capturar tiempo de inicio aquí
+  
+  try {
     const formData = new FormData();
     formData.append('log_file', logFile);
     formData.append('config_file', configFile);
 
-    try {
-      // 🔧 FIX CRÍTICO: Timeout de 5 minutos para archivos grandes (500MB+)
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minutos
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
 
-      const response = await fetch(`${API_BASE}/upload?server_type=${serverType}`, {
-        method: 'POST',
-        body: formData,
-        signal: controller.signal, // 🎯 LÍNEA CRÍTICA - Signal para timeout
-      });
+    const response = await fetch(`${API_BASE}/upload?server_type=${serverType}`, {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal
+    });
 
-      clearTimeout(timeoutId); // 🎯 LÍNEA CRÍTICA - Limpiar timeout si termina antes
+    clearTimeout(timeoutId);
 
-      const result = await response.json();
-      if (response.ok) {
-        onUploadSuccess(result);
-      } else {
-        alert('Error: ' + result.detail);
-      }
-    } catch (error) {
-      // 🔧 FIX CRÍTICO: Mejor manejo de errores de timeout
-      if (error.name === 'AbortError') {
-        alert('Processing timeout (>5 minutes). Large files may still be processing in background. Check databases tab in a few minutes.');
-      } else {
-        alert('Upload failed: ' + error.message);
-      }
-    } finally {
-      setUploading(false);
+    const result = await response.json();
+    if (response.ok) {
+      const totalTime = (performance.now() - startTime) / 1000; // ← Calcular tiempo total
+      const resultWithTotalTime = { ...result, total_time: totalTime }; // ← Agregar al resultado
+      onUploadSuccess(resultWithTotalTime);
+    } else {
+      alert('Error: ' + result.detail);
     }
-  };
+  } catch (error) {
+    // ... resto del código de error
+  } finally {
+    setUploading(false);
+  }
+};
 
   return (
-    <div className="max-w-2xl mx-auto">
-      <div className="bg-white shadow rounded-lg p-6">
+  <div className="max-w-lg mx-auto">
+      <div className="bg-white shadow rounded-lg p-4">
         <h2 className="text-lg font-medium text-gray-900 mb-6">Upload Log Files</h2>
 
         <form onSubmit={handleUpload} className="space-y-6">
@@ -325,11 +325,11 @@ function UploadTab({ onUploadSuccess, uploadStatus }) {
           {/* Log File Upload */}
           <div>
             <label className="block text-sm font-medium text-gray-700">
-              Log File (.log)
+              Log File ({serverType === 'eDS' ? '.log' : '.FSC'})
             </label>
             <input
               type="file"
-              accept=".log"
+              accept={serverType === 'eDS' ? '.log' : '.fsc'}
               onChange={(e) => setLogFile(e.target.files[0])}
               className="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
             />
@@ -348,49 +348,35 @@ function UploadTab({ onUploadSuccess, uploadStatus }) {
             />
           </div>
 
-          {/* Submit Button */}
+          {/* Submit Button with blue gradient and timer inside */}
           <div>
             <button
               type="submit"
               disabled={uploading || !logFile || !configFile}
               className={
-                'w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white ' +
-                ((uploading || !logFile || !configFile)
-                  ? 'bg-gray-400 cursor-not-allowed'
-                  : 'bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500')
+                'w-full flex justify-center items-center py-1.5 px-4 rounded-md text-sm font-semibold transition-colors duration-200 ' +
+                (uploading
+                  ? 'bg-gradient-to-r from-blue-400 via-blue-500 to-indigo-500 border-2 border-blue-300 shadow-lg text-white'
+                  : (!logFile || !configFile)
+                    ? 'bg-gray-400 text-white cursor-not-allowed'
+                    : 'bg-blue-600 hover:bg-blue-700 text-white border border-transparent shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500')
               }
+              style={uploading ? {transition: 'background 0.3s'} : {}}
             >
               {uploading ? (
                 <>
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                  Processing... {processingTime.toFixed(1)}s
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-3"></div>
+                  <span className="tracking-wide">Processing... {processingTime.toFixed(1)}s</span>
                 </>
               ) : (
-                'Upload & Process with Polars'
+                'Upload & Process'
               )}
             </button>
           </div>
         </form>
 
-        {/* Temporizador prominente durante procesamiento */}
-        {uploading && (
-          <div className="mt-6 p-6 bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-lg shadow-lg">
-            <div className="flex items-center justify-center">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-4 border-blue-600 mr-4"></div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-blue-800">
-                  {processingTime.toFixed(1)}s
-                </div>
-                <div className="text-sm text-blue-600 font-medium">
-                  ⚡ Ultra-fast processing with Polars
-                </div>
-              </div>
-            </div>
-            <div className="mt-4 bg-blue-100 rounded-full h-2">
-              <div className="bg-blue-600 h-2 rounded-full animate-pulse" style={{width: '100%'}}></div>
-            </div>
-          </div>
-        )}
+  {/* Mostrar el tiempo real final del backend tras terminar */}
+  {/* Eliminado: mensaje duplicado de Processing time */}
 
         {/* Upload Status */}
         {uploadStatus && (
@@ -402,11 +388,10 @@ function UploadTab({ onUploadSuccess, uploadStatus }) {
                 </h3>
                 <div className="mt-2 text-sm text-green-700">
                   <p>Records processed: <strong>{uploadStatus.records_processed?.toLocaleString()}</strong></p>
-                  <p>Processing time: <strong>{uploadStatus.processing_time?.toFixed(2)}s</strong></p>
+                  <p>Total time: <strong>{uploadStatus.total_time?.toFixed(2)}s</strong></p>
                   <p>Table created: <strong>{uploadStatus.table_name}</strong></p>
                   <p>Database ID: <strong>{uploadStatus.database_id}</strong></p>
                   <p className="text-xs mt-2 text-green-600">
-                    ⚡ Powered by Polars + PostgreSQL
                   </p>
                 </div>
               </div>
@@ -482,7 +467,7 @@ function ViewLogsTab({
   return (
     <div className="space-y-6">
       {/* Database Selection & Search */}
-      <div className="bg-white shadow rounded-lg p-6">
+  <div className="bg-white shadow p-6">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between space-y-4 md:space-y-0">
           {/* Database Selector */}
           <div className="flex items-center space-x-4">

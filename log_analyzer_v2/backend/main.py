@@ -1,6 +1,5 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-import polars as pl
 import tempfile
 import os
 import json
@@ -12,16 +11,23 @@ from datetime import datetime
 import asyncpg
 import time
 import logging
+import xml.etree.ElementTree as ET
 
 # Configuración
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Log Analyzer API", version="2.1.0")
+app = FastAPI(title="Log Analyzer - Ultra Optimized", version="4.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://loguser:logpass@postgres:5432/logs_analyzer")
 db_pool = None
+
+# Regex compilados para timestamp parsing ultra-rápido
+TIMESTAMP_PATTERNS = [
+    re.compile(r'^(\d{2})/(\d{2})/(\d{4}) (\d{2}):(\d{2}):(\d{2})\.(\d{3})$'),
+    re.compile(r'^(\d{2})/(\d{2})/(\d{4}) (\d{2}):(\d{2}):(\d{2})$')
+]
 
 # Models
 class ProcessResponse(BaseModel):
@@ -54,6 +60,451 @@ class DatabaseInfo(BaseModel):
     record_count: int
     file_size_mb: float
 
+class UltraSchema:
+    """Esquema ultra-optimizado con mapeo por MessageField (CORREGIDO)"""
+    
+    def __init__(self, config: Dict):
+        self.columns = []  # [(column_name, sql_type)]
+        self.message_field_to_table_index = {}  # MessageField -> índice en tabla
+        self.message_id_to_field_positions = {}  # {msg_id: {field_name: log_position}}
+        self.column_count = 0
+        self._build_schema_fixed(config)
+    
+    def _build_schema_fixed(self, config: Dict):
+        """Construir esquema usando MessageField en lugar de Order"""
+        
+        # Extraer configuración del MessageID 20
+        msg_20_fields = self._get_message_20_fields(config)
+        if not msg_20_fields:
+            # Si no hay MessageID 20, usar el primer MessageID disponible
+            msg_20_fields = self._get_first_available_message_fields(config)
+            
+        logger.info(f"Using reference fields from MessageID for column ordering: {len(msg_20_fields)} fields")
+        
+        # Construir esquema de tabla basado en DefaultOrder
+        self.columns = [("timestamp", "TIMESTAMP"), ("message_id", "INTEGER")]
+        
+        # Ordenar por DefaultOrder y crear columnas
+        for default_order, field_name in sorted(msg_20_fields):
+            safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', field_name.lower())
+            self.columns.append((safe_name, "TEXT"))
+            # Mapear MessageField -> índice en tabla
+            self.message_field_to_table_index[field_name] = len(self.columns) - 1
+        
+        self.column_count = len(self.columns)
+        
+        # Pre-computar mapeos para cada MessageID
+        self._build_message_mappings(config)
+        
+        logger.info(f"Schema built: {self.column_count} columns, {len(self.message_id_to_field_positions)} MessageIDs mapped")
+    
+    def _get_message_20_fields(self, config: Dict):
+        """Extraer campos del MessageID 20 para definir orden de columnas"""
+        for channel in config.get("ChannelsConfiguration", []):
+            for msg in channel.get("MessageConfiguration", []):
+                if msg.get("MessageId") == 20:
+                    fields = []
+                    for field in msg.get("EnabledFields", []):
+                        field_name = field.get("MessageField")
+                        default_order = field.get("DefaultOrder", field.get("Order", 999))
+                        if field_name:
+                            fields.append((default_order, field_name))
+                    return fields
+        return []
+    
+    def _get_first_available_message_fields(self, config: Dict):
+        """Fallback: usar primer MessageID disponible si no hay MessageID 20"""
+        for channel in config.get("ChannelsConfiguration", []):
+            for msg in channel.get("MessageConfiguration", []):
+                msg_id = msg.get("MessageId")
+                if 1 <= msg_id <= 100 and msg_id not in [30, 99]:
+                    fields = []
+                    for field in msg.get("EnabledFields", []):
+                        field_name = field.get("MessageField")
+                        default_order = field.get("DefaultOrder", field.get("Order", 999))
+                        if field_name:
+                            fields.append((default_order, field_name))
+                    if fields:
+                        logger.warning(f"MessageID 20 not found, using MessageID {msg_id} for column order")
+                        return fields
+        return []
+    
+    def _build_message_mappings(self, config: Dict):
+        """Pre-computar mapeo de posiciones para cada MessageID con fallback a MessageID 20"""
+    
+        # Primero mapear todos los MessageIDs explícitamente definidos
+        explicitly_defined = set()
+    
+        for channel in config.get("ChannelsConfiguration", []):
+            for msg in channel.get("MessageConfiguration", []):
+                msg_id = msg.get("MessageId")
+                if 1 <= msg_id <= 100 and msg_id not in [30, 99]:
+                
+                    # Mapear MessageField -> posición en log
+                    field_positions = {}
+                    for log_position, field in enumerate(msg.get("EnabledFields", [])):
+                        field_name = field.get("MessageField")
+                        if field_name:
+                            # Posición en log = posición en EnabledFields + 2 (por timestamp y message_id)
+                            field_positions[field_name] = log_position + 2
+                
+                    if field_positions:
+                        self.message_id_to_field_positions[msg_id] = field_positions
+                        explicitly_defined.add(msg_id)
+                        logger.info(f"MessageID {msg_id}: mapped {len(field_positions)} fields (explicit)")
+    
+        # Obtener la estructura del MessageID 20 para usar como fallback
+        fallback_structure = self.message_id_to_field_positions.get(20)
+    
+        if fallback_structure:
+            # Aplicar fallback para MessageIDs válidos no definidos
+            valid_message_ids = set(range(1, 101)) - {30, 99}  # 1-100 excepto 30 y 99
+            undefined_message_ids = valid_message_ids - explicitly_defined
+        
+            for msg_id in undefined_message_ids:
+                # Usar la misma estructura del MessageID 20
+                self.message_id_to_field_positions[msg_id] = fallback_structure.copy()
+                logger.info(f"MessageID {msg_id}: using fallback structure from MessageID 20 ({len(fallback_structure)} fields)")
+        
+            logger.info(f"Applied MessageID 20 fallback to {len(undefined_message_ids)} undefined MessageIDs: {sorted(undefined_message_ids)}")
+        else:
+            logger.warning("MessageID 20 not found - no fallback structure available for undefined MessageIDs")
+    
+        total_mapped = len(self.message_id_to_field_positions)
+        logger.info(f"Total MessageIDs mapped: {total_mapped} (explicit: {len(explicitly_defined)}, fallback: {total_mapped - len(explicitly_defined)})")
+    
+    def parse_timestamp_fast(self, ts_str: str) -> Optional[datetime]:
+        """Timestamp parsing ultra-rápido con regex compilados"""
+        for pattern in TIMESTAMP_PATTERNS:
+            match = pattern.match(ts_str)
+            if match:
+                try:
+                    groups = [int(g) for g in match.groups()]
+                    if len(groups) == 7:  # Con milisegundos
+                        d, m, y, h, min, s, ms = groups
+                        return datetime(y, m, d, h, min, s, ms * 1000)
+                    else:  # Sin milisegundos
+                        d, m, y, h, min, s = groups
+                        return datetime(y, m, d, h, min, s)
+                except ValueError:
+                    continue
+        return None
+    
+    def parse_line_ultra_fast(self, line: str) -> Optional[List]:
+        """Parse ultra-optimizado usando mapeo por MessageField (CORREGIDO)"""
+        if not line.strip():
+            return None
+        
+        parts = line.split('|', self.column_count + 10)  # Margen extra para seguridad
+        if len(parts) < 2:
+            return None
+        
+        try:
+            # Parse timestamp y message_id
+            timestamp = self.parse_timestamp_fast(parts[0].strip())
+            message_id = int(parts[1].strip())
+            
+            if message_id not in self.message_id_to_field_positions:
+                return None
+            
+            # Inicializar record con "-" por defecto
+            record = ["-"] * self.column_count
+            record[0] = timestamp
+            record[1] = message_id
+            
+            # MAPEO CORREGIDO: Usar MessageField como clave
+            field_positions = self.message_id_to_field_positions[message_id]
+            
+            for field_name, log_position in field_positions.items():
+                # Verificar que el campo existe en el esquema de tabla
+                if field_name in self.message_field_to_table_index:
+                    # Verificar que hay datos en esa posición del log
+                    if log_position < len(parts):
+                        value = parts[log_position].strip()
+                        if value:  # Solo sobrescribir "-" si hay valor real
+                            table_index = self.message_field_to_table_index[field_name]
+                            record[table_index] = value
+            
+            return record
+            
+        except (ValueError, IndexError) as e:
+            logger.debug(f"Parse error for line: {line[:50]}... Error: {e}")
+            return None
+    
+    def get_create_table_sql(self, table_name: str) -> str:
+        """SQL para crear tabla"""
+        safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+        
+        column_defs = ["id BIGSERIAL PRIMARY KEY"]
+        for col_name, col_type in self.columns:
+            column_defs.append(f"{col_name} {col_type}")
+        
+        return f"""
+        CREATE TABLE {safe_name} ({', '.join(column_defs)});
+        CREATE INDEX idx_{safe_name}_msgid ON {safe_name}(message_id);
+        CREATE INDEX idx_{safe_name}_ts ON {safe_name}(timestamp);
+        """
+
+
+class SCNETSchemaOptimized:
+    """Esquema SCNET corregido con orden del MessageID 20 y parsing funcional"""
+    
+    def __init__(self, xml_path: str):
+        self.columns = []  # [(column_name, sql_type)]
+        self.message_id_to_field_positions = {}  # {msg_id: {field_name: log_position}}
+        self.property_to_table_index = {}  # property_name -> índice en tabla
+        self.column_count = 0
+        self.reference_order = []  # Orden de MessageID 20
+        self._build_schema_from_xml(xml_path)
+    
+    def _build_schema_from_xml(self, xml_path: str):
+        """Construir esquema con orden del MessageID 20"""
+        try:
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+            
+            # PASO 1: Extraer TODOS los MessageIDs y sus propiedades
+            parcel_reports = {}
+            all_properties = set()
+            reference_properties_order = []  # Para MessageID 20
+            
+            for report in root.findall('.//ParcelDataReport'):
+                report_id = report.get('id', '')
+                
+                # Determinar MessageID real
+                message_number = None
+                text_element = report.find('text')
+                
+                if text_element is not None and text_element.text:
+                    try:
+                        message_number = int(text_element.text.strip())
+                    except ValueError:
+                        continue
+                else:
+                    try:
+                        message_number = int(report_id)
+                    except ValueError:
+                        continue
+                
+                # Extraer propiedades EN ORDEN
+                properties = []
+                for prop in report.findall('property'):
+                    prop_text = prop.text
+                    if prop_text:
+                        prop_name = prop_text.strip()
+                        properties.append(prop_name)
+                        all_properties.add(prop_name)
+                
+                if properties and message_number is not None:
+                    parcel_reports[message_number] = properties
+                    
+                    # CAPTURAR ORDEN DEL MessageID 20 como referencia
+                    if message_number == 20:
+                        reference_properties_order = properties.copy()
+                        logger.info(f"MessageID 20 found - using as column order reference: {len(properties)} properties")
+                
+                logger.info(f"SCNET MessageID {message_number}: {len(properties)} properties")
+            
+            if not parcel_reports:
+                raise HTTPException(400, "No valid ParcelDataReport found in XML")
+            
+            # PASO 2: Crear esquema de tabla usando ORDEN del MessageID 20
+            self._create_table_schema_with_reference_order(all_properties, reference_properties_order)
+            
+            # PASO 3: Crear mapeos para cada mensaje
+            self._create_message_mappings(parcel_reports)
+            
+            logger.info(f"SCNET Schema built: {self.column_count} columns, {len(self.message_id_to_field_positions)} MessageIDs")
+            
+        except ET.ParseError as e:
+            logger.error(f"Error parsing XML: {e}")
+            raise HTTPException(400, f"Invalid XML file: {e}")
+        except Exception as e:
+            logger.error(f"Error building SCNET schema: {e}")
+            raise HTTPException(500, f"Error processing XML: {e}")
+    
+    def _create_table_schema_with_reference_order(self, all_properties: set, reference_order: list):
+        """Crear esquema usando el orden del MessageID 20"""
+        # Columnas base
+        self.columns = [("timestamp", "TIMESTAMP"), ("message_id", "INTEGER")]
+        
+        # Usar orden del MessageID 20 si existe
+        if reference_order:
+            ordered_properties = reference_order.copy()
+            # Agregar propiedades que no estén en MessageID 20 al final
+            remaining = sorted(all_properties - set(reference_order))
+            ordered_properties.extend(remaining)
+            logger.info(f"Using MessageID 20 order: {len(reference_order)} properties + {len(remaining)} additional")
+        else:
+            # Fallback: orden alfabético
+            ordered_properties = sorted(all_properties)
+            logger.warning("MessageID 20 not found - using alphabetical order")
+        
+        # Crear columnas y mapeo
+        for i, prop_name in enumerate(ordered_properties):
+            safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', prop_name.lower())
+            self.columns.append((safe_name, "TEXT"))
+            # Mapear property_name -> índice en tabla
+            self.property_to_table_index[prop_name] = i + 2  # +2 por timestamp, message_id
+        
+        self.column_count = len(self.columns)
+        logger.info(f"Table schema created: {self.column_count} columns")
+    
+    def _create_message_mappings(self, parcel_reports: dict):
+        """Crear mapeos de posición para cada MessageID - LÓGICA SIMPLIFICADA"""
+        
+        # MessageIDs que no tienen <text> en el XML - leen PIC directamente de posición 2
+        no_text_message_ids = {11, 13, 31}
+        
+        for message_number, properties in parcel_reports.items():
+            field_positions = {}
+            
+            if message_number in no_text_message_ids:
+                # LÓGICA SIMPLE: MessageIDs sin <text>
+                # Posición 2: PIC (leído directamente del archivo)
+                field_positions['pic'] = 2
+                
+                # Posición 3+: Las propiedades definidas en XML
+                for i, prop_name in enumerate(properties):
+                    field_positions[prop_name] = i + 3
+                
+                logger.info(f"MessageID {message_number} (sin <text>): PIC directo pos 2 + {len(properties)} properties del XML")
+                
+            else:
+                # REGLA NORMAL: MessageIDs con <text>
+                # Posición 2+: Las propiedades definidas en XML
+                for log_position, prop_name in enumerate(properties):
+                    field_positions[prop_name] = log_position + 2
+                
+                logger.info(f"MessageID {message_number} (con <text>): {len(properties)} properties normales")
+            
+            if field_positions:
+                self.message_id_to_field_positions[message_number] = field_positions
+        
+        logger.info(f"Message mappings created for {len(self.message_id_to_field_positions)} MessageIDs")
+    
+    def parse_timestamp_fast(self, ts_str: str) -> Optional[datetime]:
+        """Parse timestamp formato SCNET: DD/MM/YYYY HH:MM:SS:mmm"""
+        try:
+            # Formato: 07/05/2025 00:00:00:659
+            if ':' in ts_str and len(ts_str.split(':')) >= 4:
+                date_part, time_part = ts_str.split(' ', 1)
+                day, month, year = date_part.split('/')
+                time_parts = time_part.split(':')
+                if len(time_parts) >= 4:
+                    hour, minute, second, millisecond = time_parts[0], time_parts[1], time_parts[2], time_parts[3]
+                    return datetime(
+                        int(year), int(month), int(day),
+                        int(hour), int(minute), int(second),
+                        int(millisecond) * 1000
+                    )
+        except (ValueError, IndexError):
+            pass
+        return None
+    
+    def parse_line_ultra_fast(self, line: str) -> Optional[List]:
+        """Parse línea FSC con limpieza robusta de caracteres de control"""
+        if not line.strip():
+            return None
+    
+        # PASO 1: Limpiar caracteres de control y @ al final
+        line = line.rstrip('@').strip()
+        
+        # Remover caracteres de control comunes (0x00 a 0x1F)
+        import re
+        line = re.sub(r'[\x00-\x1F]', '', line)
+        
+        if not line:
+            return None
+    
+        parts = line.split('|')
+        if len(parts) < 3:
+            return None
+    
+        try:
+            # Parse básico
+            timestamp_str = parts[0].strip()
+            message_id_str = parts[1].strip()
+            
+            # PASO 2: Limpiar message_id de caracteres no numéricos residuales
+            message_id_clean = re.sub(r'[^0-9]', '', message_id_str)
+            
+            if not message_id_clean:
+                return None
+        
+            timestamp = self.parse_timestamp_fast(timestamp_str)
+            if not timestamp:
+                return None
+            
+            message_id = int(message_id_clean)
+        
+            # Verificar si existe mapeo para este MessageID
+            if message_id not in self.message_id_to_field_positions:
+                # DEBUG TEMPORAL: comentar después de validar
+                # logger.debug(f"MessageID {message_id} not in schema. Available: {list(self.message_id_to_field_positions.keys())[:5]}...")
+                return None
+        
+            # Inicializar record
+            record = ["-"] * self.column_count
+            record[0] = timestamp
+            record[1] = message_id
+        
+            # Mapear campos
+            field_positions = self.message_id_to_field_positions[message_id]
+            mapped_count = 0
+            
+            # DEBUG TEMPORAL: para las primeras 10 líneas de cada MessageID
+            is_debug = hasattr(self, '_debug_count')
+            if not is_debug:
+                self._debug_count = {}
+            
+            if message_id not in self._debug_count:
+                self._debug_count[message_id] = 0
+            
+            debug_this_line = self._debug_count[message_id] < 3
+            if debug_this_line:
+                self._debug_count[message_id] += 1
+                logger.info(f"DEBUG MessageID {message_id}: Line has {len(parts)} parts, expects {len(field_positions)} fields")
+            
+            for prop_name, log_position in field_positions.items():
+                if prop_name in self.property_to_table_index:
+                    if log_position < len(parts):
+                        value = parts[log_position].strip()
+                        if value:  # Solo mapear valores no vacíos
+                            table_index = self.property_to_table_index[prop_name]
+                            record[table_index] = value
+                            mapped_count += 1
+                            
+                            if debug_this_line:
+                                logger.info(f"  Mapped {prop_name} (pos {log_position}): '{value[:20]}...' -> col {table_index}")
+                    elif debug_this_line:
+                        logger.warning(f"  Missing {prop_name} at position {log_position} (line has {len(parts)} parts)")
+        
+            if debug_this_line:
+                logger.info(f"  Result: {mapped_count}/{len(field_positions)} fields mapped for MessageID {message_id}")
+            
+            # Solo retornar si se mapeó al menos algo
+            return record if mapped_count > 0 else None
+        
+        except (ValueError, IndexError) as e:
+            # DEBUG TEMPORAL
+            logger.debug(f"Parse error: {str(e)} - Line: {line[:100]}...")
+            return None
+    
+    def get_create_table_sql(self, table_name: str) -> str:
+        """SQL para crear tabla SCNET"""
+        safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+        
+        column_defs = ["id BIGSERIAL PRIMARY KEY"]
+        for col_name, col_type in self.columns:
+            column_defs.append(f"{col_name} {col_type}")
+        
+        return f"""
+        CREATE TABLE {safe_name} ({', '.join(column_defs)});
+        CREATE INDEX idx_{safe_name}_msgid ON {safe_name}(message_id);
+        CREATE INDEX idx_{safe_name}_ts ON {safe_name}(timestamp);
+        """
+
 # Database functions
 async def get_db_pool():
     global db_pool
@@ -76,516 +527,289 @@ async def init_database():
             )
         """)
 
-# Core processing functions
-def extract_all_fields_and_mappings(config: Dict) -> Tuple[Dict[int, Dict[int, Tuple[str, int]]], List[str], List[str]]:
-    """
-    Extrae todos los campos únicos y crea mapeos por MessageID.
-    Ahora soporta órdenes no consecutivos: guarda la posición real (index en la lista de EnabledFields)
-    además del order definido en el JSON.
-    """
-    mappings: Dict[int, Dict[int, Tuple[str, int]]] = {}
-    all_fields = set()
-    display_order = []  # Orden de MessageID 20 si existe
-
-    for channel in config.get("ChannelsConfiguration", []):
-        for msg in channel.get("MessageConfiguration", []):
-            msg_id = int(msg.get("MessageId", -1))
-            if 1 <= msg_id <= 100 and msg_id not in [30, 99]:
-                fields: Dict[int, Tuple[str, int]] = {}
-                used_orders = set()
-
-                enabled_fields = msg.get("EnabledFields", [])
-                for position, field in enumerate(enabled_fields):  # posición real en el log
-                    field_name = field.get("MessageField", "")
-                    if not field_name:
-                        continue
-
-                    order = field.get("Order", field.get("DefaultOrder", 9999))
-
-                    # Si se repite el mismo order, usamos la posición real
-                    if order in used_orders:
-                        logger.warning(
-                            f"MessageID {msg_id}: Order {order} duplicado para {field_name}, "
-                            f"usando posición {position}"
-                        )
-                        order = position
-
-                    used_orders.add(order)
-                    fields[order] = (field_name, position)
-                    all_fields.add(field_name)
-
-                    # Capturar display order desde MessageID 20
-                    if msg_id == 20:
-                        display_order.append((order, field_name))
-
-                if fields:
-                    mappings[msg_id] = fields
-                    logger.info(
-                        f"MessageID {msg_id} mapping: "
-                        f"{[(o, f, p) for o, (f, p) in sorted(fields.items())]}"
-                    )
-
-    # Ordenar columnas basado en display_order de ID 20
-    display_order.sort(key=lambda x: x[0])
-    ordered_fields = [field for order, field in display_order]
-
-    # Agregar cualquier campo que no estuviera en ID 20
-    remaining_fields = sorted(all_fields - set(ordered_fields))
-    ordered_fields.extend(remaining_fields)
-
-    # Columnas finales: timestamp, message_id + todos los campos ordenados
-    all_columns = ["timestamp", "message_id"] + ordered_fields
-
-    return mappings, all_columns, ordered_fields
-
-
-def analyze_log_file_structure(log_path: str) -> Tuple[int, Dict[int, int], int]:
-    """🎯 COMPLETE FILE ANALYSIS: Find max columns, MessageID distribution, and sample data"""
-    max_cols = 0
-    lines_processed = 0
-    message_id_stats = {}
-    message_id_max_cols = {}
-    sample_lines = []
-    
-    logger.info("🔍 ANALYZING COMPLETE FILE STRUCTURE...")
-    start_time = time.time()
-    
-    with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-                
-            parts = line.split('|')
-            current_cols = len(parts)
-            
-            # Store first 5 sample lines for debugging
-            if len(sample_lines) < 5:
-                sample_lines.append(f"Line {line_num}: {current_cols} cols -> {line[:100]}...")
-            
-            if len(parts) < 2:
-                continue
-                
-            # Check if second column (index 1) is a valid message ID
-            try:
-                message_id_str = parts[1].strip()
-                if not message_id_str.isdigit():
-                    continue
-                    
-                message_id = int(message_id_str)
-                if 1 <= message_id <= 100 and message_id not in [30, 99]:
-                    # Track statistics
-                    message_id_stats[message_id] = message_id_stats.get(message_id, 0) + 1
-                    
-                    # Update max columns for this message ID
-                    if message_id not in message_id_max_cols or current_cols > message_id_max_cols[message_id]:
-                        message_id_max_cols[message_id] = current_cols
-                        logger.info(f"📊 MessageID {message_id}: NEW MAX {current_cols} columns (line {line_num})")
-                    
-                    # Update global max
-                    if current_cols > max_cols:
-                        max_cols = current_cols
-                        logger.info(f"🏆 GLOBAL MAX: {max_cols} columns (MessageID {message_id}, line {line_num})")
-                    
-                    lines_processed += 1
-                    
-                    # Log progress every 50k lines
-                    if lines_processed % 50000 == 0:
-                        elapsed = time.time() - start_time
-                        logger.info(f"⏳ Progress: {lines_processed:,} valid lines, {elapsed:.1f}s, current max: {max_cols}")
-                        
-            except (ValueError, IndexError):
-                continue
-    
-    analysis_time = time.time() - start_time
-    
-    # Final summary
-    logger.info("=" * 60)
-    logger.info("📋 COMPLETE FILE ANALYSIS RESULTS:")
-    logger.info(f"⏱️  Analysis time: {analysis_time:.2f} seconds")
-    logger.info(f"📊 Total valid lines analyzed: {lines_processed:,}")
-    logger.info(f"🏆 Maximum columns found: {max_cols}")
-    logger.info(f"🎯 MessageIDs found: {sorted(message_id_stats.keys())}")
-    
-    for msg_id in sorted(message_id_max_cols.keys()):
-        count = message_id_stats[msg_id]
-        cols = message_id_max_cols[msg_id]
-        logger.info(f"    MessageID {msg_id:2d}: {count:6,} lines, max {cols:2d} columns")
-    
-    logger.info("📄 Sample lines:")
-    for sample in sample_lines[:3]:
-        logger.info(f"    {sample}")
-    logger.info("=" * 60)
-    
-    return max_cols, message_id_max_cols, lines_processed
-
 async def get_unique_table_name(base_name: str) -> str:
-    """Generate unique table name (dia_22, dia_22_1, etc.)"""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         counter = 0
         table_name = base_name
-        
         while True:
-            exists = await conn.fetchval("""
-                SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)
-            """, table_name)
-            
+            exists = await conn.fetchval(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)", 
+                table_name
+            )
             if not exists:
                 return table_name
-            
             counter += 1
             table_name = f"{base_name}_{counter}"
 
-async def create_dynamic_table(table_name: str, all_columns: List[str]):
-    """Create table with ALL possible columns from JSON"""
-    pool = await get_db_pool()
-    
-    # Safe column names for SQL
-    safe_columns = ["timestamp", "message_id"]
-    for col in all_columns[2:]:
-        safe_col = re.sub(r'[^a-zA-Z0-9_]', '_', col.lower())
-        safe_columns.append(safe_col)
-    
-    col_defs = [
-        "id BIGSERIAL PRIMARY KEY",
-        "timestamp TIMESTAMP",
-        "message_id INTEGER"
-    ] + [f"{col} TEXT DEFAULT '-'" for col in safe_columns[2:]]
-    
-    async with pool.acquire() as conn:
-        await conn.execute(f"CREATE TABLE {table_name} ({', '.join(col_defs)})")
-        await conn.execute(f"CREATE INDEX idx_{table_name}_msgid ON {table_name} (message_id)")
-        await conn.execute(f"CREATE INDEX idx_{table_name}_ts ON {table_name} (timestamp)")
-
 def extract_table_number(filename: str) -> str:
-    """Extract number from filename safely"""
-    number_match = re.search(r'(\d+)', filename)
-    return number_match.group(1) if number_match else str(int(time.time()))
+    match = re.search(r'(\d+)', filename)
+    return match.group(1) if match else str(int(time.time()))
 
-async def process_log_optimized(log_path: str, config: Dict, database_id: str, filename: str) -> Tuple[int, float, str]:
-    """🎯 COMPLETELY REWRITTEN: Full file analysis + optimized processing"""
+async def process_ultra_fast(log_path: str, config: Dict, database_id: str, filename: str) -> Tuple[int, float, str]:
+    """Procesamiento ultra-optimizado en una sola pasada"""
     start_time = time.time()
     
-    # Extract complete configuration
-    mappings, all_columns, display_order = extract_all_fields_and_mappings(config)
-    if not mappings:
-        raise HTTPException(400, "No valid message configurations found")
+    # Construir esquema
+    schema = UltraSchema(config)
+    if not schema.message_id_to_field_positions:
+        raise HTTPException(400, "No valid MessageIDs in config")
     
-    # Generate unique table name
+    # Crear tabla
     table_number = extract_table_number(filename)
-    base_table_name = f"dia_{table_number}"
-    table_name = await get_unique_table_name(base_table_name)
-    
-    file_size_mb = os.path.getsize(log_path) / (1024 * 1024)
-    logger.info("🚀" * 20)
-    logger.info(f"🚀 PROCESSING: {filename} ({file_size_mb:.1f}MB) -> {table_name}")
-    logger.info(f"📋 JSON configuration: {len(all_columns)} total columns expected")
-    logger.info(f"🎯 MessageIDs in config: {sorted(mappings.keys())}")
-    
-    # 🎯 PHASE 1: COMPLETE FILE ANALYSIS
-    max_cols, message_id_max_cols, valid_lines_found = analyze_log_file_structure(log_path)
-    
-    if max_cols == 0:
-        raise HTTPException(400, "No valid message lines found in log file")
-    
-    # Create table with ALL columns from JSON
-    await create_dynamic_table(table_name, all_columns)
-    logger.info(f"✅ Database table created with {len(all_columns)} columns")
-    
-    # 🎯 PHASE 2: PRE-FILTER FILE TO CONTAIN ONLY VALID MESSAGE LINES
-    logger.info(f"🔧 Pre-filtering file to contain only valid MessageID lines...")
-    
-    import tempfile
-    filtered_file = tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False, encoding='utf-8')
-    lines_written = 0
-    
-    try:
-        with open(log_path, 'r', encoding='utf-8', errors='ignore') as input_file:
-            for line in input_file:
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                parts = line.split('|')
-                if len(parts) >= 2:
-                    try:
-                        message_id_str = parts[1].strip()
-                        if message_id_str.isdigit():
-                            message_id = int(message_id_str)
-                            if 1 <= message_id <= 100 and message_id not in [30, 99]:
-                                filtered_file.write(line + '\n')
-                                lines_written += 1
-                    except (ValueError, IndexError):
-                        continue
-        
-        filtered_file.close()
-        logger.info(f"✅ Filtered file created: {lines_written:,} valid lines (was ~{valid_lines_found})")
-        
-        # 🎯 PHASE 3: LOAD FILTERED DATA (NOW POLARS WILL SEE CORRECT STRUCTURE)
-        logger.info(f"⚡ Loading pre-filtered data...")
-        
-        df = pl.read_csv(
-            filtered_file.name,
-            separator='|',
-            has_header=False,
-            ignore_errors=True,
-            encoding='utf8-lossy',
-            truncate_ragged_lines=True,
-            dtypes={"column_1": pl.Utf8, "column_2": pl.Utf8}
-        )
-        
-        current_cols = len(df.columns)
-        logger.info(f"📊 Polars detected {current_cols} columns from filtered data (expected {max_cols})")
-        
-        # Now we should have the correct structure or very close to it
-        if current_cols < max_cols:
-            logger.info(f"🔧 Adding {max_cols - current_cols} missing columns...")
-            for i in range(current_cols, max_cols):
-                df = df.with_columns(pl.lit("").cast(pl.Utf8).alias(f"temp_col_{i}"))
-        elif current_cols > max_cols:
-            logger.info(f"🔧 Trimming to {max_cols} columns...")
-            df = df.select([f"column_{i+1}" for i in range(max_cols)])
-        
-        # Rename all columns to f0, f1, f2, ... f{max_cols-1}
-        new_column_names = [f"f{i}" for i in range(max_cols)]
-        df = df.rename({old: new for old, new in zip(df.columns, new_column_names)})
-        
-        # Convert ALL columns to string to avoid dtype issues in mapping
-        df = df.with_columns([pl.col(col).cast(pl.Utf8) for col in df.columns])
-        
-        logger.info(f"✅ Clean data loaded: {len(df)} rows, {len(df.columns)} columns (all Utf8)")
-        
-    finally:
-        # Clean up the temporary filtered file
-        try:
-            os.unlink(filtered_file.name)
-        except:
-            pass
-    
-    # PHASE 3: Filter valid lines (MessageID validation)
-    logger.info("🔍 Filtering valid message records...")
-    
-    df = df.filter(
-        pl.col("f0").is_not_null() &
-        pl.col("f1").is_not_null() &
-        pl.col("f1").str.strip().str.contains(r"^\d{1,3}$") &
-        pl.col("f1").str.strip().cast(pl.Int32, strict=False).is_between(1, 100) &
-        (~pl.col("f1").str.strip().cast(pl.Int32, strict=False).is_in([30, 99]))
-    )
-    
-    logger.info(f"✅ {len(df)} valid records after filtering (expected ~{valid_lines_found})")
-    
-    if len(df) == 0:
-        return 0, time.time() - start_time, table_name
-    
-    # PHASE 4: Process timestamp and message_id
-    logger.info("🕐 Processing timestamp and message_id...")
-    
-    try:
-        df = df.with_columns([
-            # Process timestamp with better error handling
-            pl.col("f0").str.strip().str.strptime(pl.Datetime, "%d/%m/%Y %H:%M:%S%.f", strict=False)
-            .fill_null(
-                pl.col("f0").str.strip().str.strptime(pl.Datetime, "%d/%m/%Y %H:%M:%S", strict=False)
-            )
-            .alias("timestamp"),
-            
-            # Process message_id
-            pl.col("f1").str.strip().cast(pl.Int32).alias("message_id")
-        ])
-        logger.info("✅ Timestamp and message_id processing completed")
-        
-    except Exception as e:
-        logger.error(f"❌ Error processing timestamp/message_id: {e}")
-        # Log sample data for debugging
-        sample_data = df.select([pl.col("f0").head(5), pl.col("f1").head(5)])
-        logger.error(f"Sample data: {sample_data}")
-        raise HTTPException(500, f"Error processing datetime fields: {str(e)}")
-    
-    # PHASE 5: Dynamic field mapping according to JSON configuration  
-    logger.info("🗺️ Applying dynamic field mapping...")
-    logger.info(f"🎯 Mapping {len(all_columns)} JSON fields to {max_cols} file columns")
-    
-    # Prepare safe column names
-    safe_columns = ["timestamp", "message_id"]
-    for col in all_columns[2:]:
-        safe_col = re.sub(r'[^a-zA-Z0-9_]', '_', col.lower())
-        safe_columns.append(safe_col)
-    
-    # Build mapping expressions
-    mapping_expressions = [pl.col("timestamp"), pl.col("message_id")]
-    
-    for target_col_name in all_columns[2:]:
-        safe_target = re.sub(r'[^a-zA-Z0-9_]', '_', target_col_name.lower())
-        expr = pl.lit("-").cast(pl.Utf8)  # Default value
-        
-        # Check each MessageID configuration
-        for msg_id, field_mapping in mappings.items():
-            for order, (field_name, position) in field_mapping.items():
-                if field_name == target_col_name:
-                    source_col_index = position + 2  # offset por timestamp y message_id
-                    source_col = f"f{source_col_index}"
-                    
-                    # Only map if source column exists in our detected structure
-                    if source_col_index < max_cols:
-                        expr = pl.when(pl.col("message_id") == msg_id).then(
-                            pl.when(pl.col(source_col).is_null() | (pl.col(source_col).str.strip() == ""))
-                            .then(pl.lit("-"))
-                            .otherwise(pl.col(source_col).str.strip())
-                        ).otherwise(expr)
-                        logger.info(f"    📌 {target_col_name} <- f{source_col_index} (MessageID {msg_id}, Order {order})")
-                        break
-                    else:
-                        logger.warning(f"    ⚠️  {target_col_name}: source f{source_col_index} > max_cols {max_cols}")
-                        break
-        
-        mapping_expressions.append(expr.alias(safe_target))
-    
-    # Apply mapping
-    try:
-        df_mapped = df.select(mapping_expressions)
-        logger.info(f"✅ Mapping complete: {len(df_mapped)} records with {len(safe_columns)} columns")
-        
-    except Exception as e:
-        logger.error(f"❌ Error in field mapping: {e}")
-        logger.error(f"Target columns: {len(all_columns)}, Detected max columns: {max_cols}")
-        logger.error(f"MessageID mappings: {list(mappings.keys())}")
-        raise HTTPException(500, f"Error in field mapping: {str(e)}")
-    
-    # PHASE 6: Bulk insert to database
-    logger.info("💨 Bulk inserting to database...")
-    
-    # Convert to records for insertion
-    records = df_mapped.to_dicts()
+    table_name = await get_unique_table_name(f"logs_{table_number}")
     
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        # Smart chunking for large datasets
-        chunk_size = 100000
-        total_inserted = 0
-        
-        try:
-            if len(records) > chunk_size:
-                logger.info(f"📦 Processing {len(records)} records in chunks of {chunk_size}")
-                
-                for i in range(0, len(records), chunk_size):
-                    chunk = records[i:i + chunk_size]
-                    
-                    # Prepare data for this chunk
-                    insert_data = []
-                    for record in chunk:
-                        row = []
-                        for col in safe_columns:
-                            value = record.get(col)
-                            if col == "message_id":
-                                row.append(value if isinstance(value, int) else None)
-                            elif col == "timestamp":
-                                row.append(value)
-                            else:
-                                row.append(str(value) if value is not None else "-")
-                        insert_data.append(tuple(row))
-                    
-                    # Insert chunk
-                    await conn.copy_records_to_table(table_name, records=insert_data, columns=safe_columns)
-                    total_inserted += len(insert_data)
-                    
-                    # Log progress every 5 chunks
-                    if (i//chunk_size + 1) % 5 == 0:
-                        logger.info(f"📦 Progress: {total_inserted:,} records inserted")
-                    
-            else:
-                # Single insert for smaller datasets
-                insert_data = []
-                for record in records:
-                    row = []
-                    for col in safe_columns:
-                        value = record.get(col)
-                        if col == "message_id":
-                            row.append(value if isinstance(value, int) else None)
-                        elif col == "timestamp":
-                            row.append(value)
-                        else:
-                            row.append(str(value) if value is not None else "-")
-                    insert_data.append(tuple(row))
-                
-                await conn.copy_records_to_table(table_name, records=insert_data, columns=safe_columns)
-                total_inserted = len(insert_data)
+        await conn.execute(schema.get_create_table_sql(table_name))
+    
+    file_size_mb = os.path.getsize(log_path) / (1024 * 1024)
+    logger.info(f"Ultra-fast processing: {filename} ({file_size_mb:.1f}MB) -> {table_name}")
+    
+    # Procesamiento ultra-optimizado
+    batch = []
+    batch_size = 50000  # Batch grande para menos overhead
+    total_processed = 0
+    lines_read = 0
+    last_log = start_time
+    
+    with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            lines_read += 1
             
-            # Save metadata
-            await conn.execute("""
-                INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info)
-                VALUES ($1, $1, $2, $3, $4, $5)
-                ON CONFLICT (id) DO UPDATE SET
-                    record_count = EXCLUDED.record_count,
-                    file_size_mb = EXCLUDED.file_size_mb,
-                    columns_info = EXCLUDED.columns_info
-            """, database_id, table_name, total_inserted, file_size_mb, json.dumps(all_columns))
-            
-        except Exception as e:
-            logger.error(f"❌ Database insertion error: {e}")
-            raise HTTPException(500, f"Error inserting data: {str(e)}")
+            record_array = schema.parse_line_ultra_fast(line)
+            if record_array:
+                batch.append(tuple(record_array))
+                
+                if len(batch) >= batch_size:
+                    inserted = await insert_ultra_fast(pool, table_name, batch, schema.columns)
+                    total_processed += inserted
+                    batch = []
+                    
+                    # Log menos frecuente
+                    if time.time() - last_log > 10:
+                        rate = total_processed / (time.time() - start_time)
+                        logger.info(f"Progress: {lines_read:,} lines, {total_processed:,} records ({rate:,.0f}/sec)")
+                        last_log = time.time()
+    
+    # Último batch
+    if batch:
+        inserted = await insert_ultra_fast(pool, table_name, batch, schema.columns)
+        total_processed += inserted
     
     processing_time = time.time() - start_time
-    speed = total_inserted / processing_time if processing_time > 0 else 0
+    speed = total_processed / processing_time if processing_time > 0 else 0
     
-    logger.info("🎉" * 20)
-    logger.info(f"🎉 PROCESSING COMPLETE: {total_inserted:,} records in {processing_time:.2f}s ({speed:,.0f} rec/sec)")
-    logger.info("🎉" * 20)
+    # Guardar metadatos
+    column_names = [col[0] for col in schema.columns]
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info)
+            VALUES ($1, $1, $2, $3, $4, $5)
+        """, database_id, table_name, total_processed, file_size_mb, json.dumps(column_names))
     
-    return total_inserted, processing_time, table_name
+    logger.info(f"ULTRA-FAST COMPLETE: {total_processed:,} records in {processing_time:.2f}s ({speed:,.0f} rec/sec)")
+    
+    return total_processed, processing_time, table_name
+
+async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: str, filename: str) -> Tuple[int, float, str]:
+    """Procesamiento SCNET con debug temporal"""
+    start_time = time.time()
+    
+    # Construir esquema
+    schema = SCNETSchemaOptimized(xml_path)
+    if not schema.message_id_to_field_positions:
+        raise HTTPException(400, "No valid ParcelDataReport found in XML")
+    
+    # Crear tabla
+    table_number = extract_table_number(filename)
+    table_name = await get_unique_table_name(f"scnet_{table_number}")
+    
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(schema.get_create_table_sql(table_name))
+    
+    file_size_mb = os.path.getsize(fsc_path) / (1024 * 1024)
+    logger.info(f"SCNET processing: {filename} ({file_size_mb:.1f}MB) -> {table_name}")
+    
+    # Log esquema para debug
+    logger.info(f"Available MessageIDs: {sorted(schema.message_id_to_field_positions.keys())}")
+    logger.info(f"Table will have {schema.column_count} columns")
+    
+    # Procesamiento con contadores de debug
+    batch = []
+    batch_size = 50000
+    total_processed = 0
+    lines_read = 0
+    lines_skipped = 0
+    last_log = start_time
+    
+    with open(fsc_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            line = line.replace('\x00', '')
+            lines_read += 1
+            
+            record_array = schema.parse_line_ultra_fast(line)
+            if record_array:
+                batch.append(tuple(record_array))
+                if len(batch) >= batch_size:
+                    inserted = await insert_ultra_fast(pool, table_name, batch, schema.columns)
+                    total_processed += inserted
+                    batch = []
+                    
+                    # Log progreso
+                    if time.time() - last_log > 5:  # Más frecuente para debug
+                        rate = total_processed / (time.time() - start_time)
+                        skip_rate = (lines_skipped / lines_read) * 100 if lines_read > 0 else 0
+                        logger.info(f"SCNET Progress: {lines_read:,} lines read, {total_processed:,} records processed ({rate:,.0f}/sec, {skip_rate:.1f}% skipped)")
+                        last_log = time.time()
+            else:
+                lines_skipped += 1
+    
+    # Último batch
+    if batch:
+        inserted = await insert_ultra_fast(pool, table_name, batch, schema.columns)
+        total_processed += inserted
+    
+    processing_time = time.time() - start_time
+    speed = total_processed / processing_time if processing_time > 0 else 0
+    
+    # Stats finales
+    skip_rate = (lines_skipped / lines_read) * 100 if lines_read > 0 else 0
+    logger.info(f"SCNET Final Stats: {lines_read:,} lines read, {total_processed:,} records, {lines_skipped:,} skipped ({skip_rate:.1f}%)")
+    
+    # Guardar metadatos
+    column_names = [col[0] for col in schema.columns]
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info)
+            VALUES ($1, $1, $2, $3, $4, $5)
+        """, database_id, table_name, total_processed, file_size_mb, json.dumps(column_names))
+    
+    logger.info(f"SCNET COMPLETE: {total_processed:,} records in {processing_time:.2f}s ({speed:,.0f} rec/sec)")
+    
+    return total_processed, processing_time, table_name
+
+async def insert_ultra_fast(pool, table_name: str, batch: List[tuple], columns: List[tuple]) -> int:
+    """Inserción ultra-optimizada"""
+    if not batch:
+        return 0
+    
+    safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+    column_names = [col[0] for col in columns]
+    
+    async with pool.acquire() as conn:
+        try:
+            await conn.copy_records_to_table(safe_name, records=batch, columns=column_names)
+            return len(batch)
+        except Exception as e:
+            logger.error(f"COPY failed: {e}")
+            # Fallback a executemany
+            placeholders = ', '.join(f'${i+1}' for i in range(len(column_names)))
+            sql = f"INSERT INTO {safe_name} ({', '.join(column_names)}) VALUES ({placeholders})"
+            try:
+                await conn.executemany(sql, batch)
+                return len(batch)
+            except Exception as e2:
+                logger.error(f"Executemany failed: {e2}")
+                return 0
 
 # API Routes
 @app.on_event("startup")
 async def startup():
     await init_database()
-    logger.info("🚀 Log Analyzer API started - COMPLETE FILE ANALYSIS VERSION")
+    logger.info("Ultra-Optimized Log Analyzer started")
 
 @app.get("/")
 async def root():
-    return {"message": "Log Analyzer API - Complete File Analysis", "status": "running", "version": "2.1.0"}
+    return {"message": "Ultra-Optimized Log Analyzer", "version": "4.0.0"}
 
 @app.post("/upload", response_model=ProcessResponse)
-async def upload_files(log_file: UploadFile = File(...), config_file: UploadFile = File(...), server_type: str = Query("eDS")):
-    """Process log files with JSON configuration"""
+async def upload_files(
+    log_file: UploadFile = File(...), 
+    config_file: UploadFile = File(...), 
+    server_type: str = Query("eDS")
+):
     start_time = time.time()
     
-    if not log_file.filename.endswith('.log'):
-        raise HTTPException(400, "File must be .log")
-    if server_type == "eDS" and not config_file.filename.endswith('.json'):
-        raise HTTPException(400, "eDS requires .json config")
+    # Detectar tipo de tecnología basado en extensiones de archivo
+    log_extension = log_file.filename.split('.')[-1].lower()
+    config_extension = config_file.filename.split('.')[-1].lower()
     
-    database_id = f"{server_type.lower()}_{int(time.time())}_{log_file.filename.replace('.log', '')}"
+    # Validar combinaciones de archivos
+    if server_type.lower() == "eds":
+        if log_extension != 'log':
+            raise HTTPException(400, "eDS requires a .log file")
+        if config_extension != 'json':
+            raise HTTPException(400, "eDS requires a .json configuration file")
+    elif server_type.lower() == "scnet":
+        if log_extension not in ['fsc', 'log']:  # Permitir ambas extensiones para logs SCNET
+            raise HTTPException(400, "SCNET requires a .fsc or .log file")
+        if config_extension != 'xml':
+            raise HTTPException(400, "SCNET requires a .xml configuration file")
+    else:
+        raise HTTPException(400, f"Unsupported server_type: {server_type}. Use 'eDS' or 'SCNET'")
     
-    # Save files
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.log') as tmp_log, \
-         tempfile.NamedTemporaryFile(delete=False, suffix='.json') as tmp_config:
+    # Generar ID único para la base de datos
+    database_id = f"{server_type.lower()}_{int(time.time())}_{log_file.filename.split('.')[0]}"
+    
+    # Guardar archivos temporales
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{log_extension}') as tmp_log, \
+         tempfile.NamedTemporaryFile(delete=False, suffix=f'.{config_extension}') as tmp_config:
         
         tmp_log.write(await log_file.read())
         tmp_config.write(await config_file.read())
         log_path, config_path = tmp_log.name, tmp_config.name
     
     try:
-        # Parse JSON configuration
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = json.loads(f.read())
+        # Procesar según el tipo de tecnología
+        if server_type.lower() == "eds":
+            logger.info(f"Processing eDS files: {log_file.filename} + {config_file.filename}")
+            
+            # Cargar configuración JSON
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # Procesar con eDS
+            records_processed, processing_time, table_name = await process_ultra_fast(
+                log_path, config, database_id, log_file.filename
+            )
+            
+            message = f"eDS: {records_processed:,} records processed -> {table_name}"
+            
+        elif server_type.lower() == "scnet":
+            logger.info(f"Processing SCNET files: {log_file.filename} + {config_file.filename}")
+            
+            # Procesar con SCNET (XML + FSC)
+            records_processed, processing_time, table_name = await process_scnet_ultra_fast(
+                log_path, config_path, database_id, log_file.filename
+            )
+            
+            message = f"SCNET: {records_processed:,} records processed -> {table_name}"
         
-        # Process with completely rewritten function
-        records_processed, processing_time, table_name = await process_log_optimized(
-            log_path, config, database_id, log_file.filename
-        )
+        else:
+            raise HTTPException(400, f"Invalid server_type: {server_type}")
+        
+        logger.info(f"Upload successful: {message}")
         
         return ProcessResponse(
             success=True,
-            message=f"Successfully processed into table '{table_name}'",
+            message=message,
             processing_time=time.time() - start_time,
             records_processed=records_processed,
             database_id=database_id,
             table_name=table_name
         )
     
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        logger.error(f"Processing error for {server_type}: {str(e)}")
+        raise HTTPException(500, f"Error processing {server_type} files: {str(e)}")
+    
     finally:
-        # Cleanup
+        # Limpiar archivos temporales
         for path in [log_path, config_path]:
             try:
                 os.unlink(path)
@@ -608,13 +832,16 @@ async def query_logs(database_id: str, query: LogQuery):
     pool = await get_db_pool()
     
     async with pool.acquire() as conn:
-        db_info = await conn.fetchrow("SELECT table_name, columns_info FROM databases WHERE id = $1", database_id)
+        db_info = await conn.fetchrow(
+            "SELECT table_name, columns_info FROM databases WHERE id = $1", 
+            database_id
+        )
         if not db_info:
             raise HTTPException(404, "Database not found")
         
-        table_name, columns = db_info['table_name'], json.loads(db_info['columns_info'] or '[]')
+        table_name = db_info['table_name']
+        columns = json.loads(db_info['columns_info'] or '[]')
         
-        # Build query conditions
         conditions, params = [], []
         
         if query.message_id:
@@ -622,15 +849,14 @@ async def query_logs(database_id: str, query: LogQuery):
             params.append(query.message_id)
         
         if query.search:
-            search_cols = [f"{re.sub(r'[^a-zA-Z0-9_]', '_', col.lower())}::text ILIKE ${len(params) + 1}" 
-                          for col in columns[2:]]
-            if search_cols:
-                conditions.append(f"({' OR '.join(search_cols)})")
+            text_cols = columns[2:7]  # Solo primeras 5 columnas para eficiencia
+            search_conds = [f"{col}::text ILIKE ${len(params) + 1}" for col in text_cols]
+            if search_conds:
+                conditions.append(f"({' OR '.join(search_conds)})")
                 params.append(f"%{query.search}%")
         
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         
-        # Get data
         total_records = await conn.fetchval(f"SELECT COUNT(*) FROM {table_name} {where_clause}", *params)
         
         offset = (query.page - 1) * query.limit
@@ -655,31 +881,24 @@ async def query_logs(database_id: str, query: LogQuery):
 async def get_table_stats(table_name: str):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        exists = await conn.fetchval("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)", table_name)
+        safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+        
+        exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)", 
+            safe_name
+        )
         if not exists:
             raise HTTPException(404, "Table not found")
         
-        # Get statistics in parallel
-        total_records, message_dist, hourly_dist, time_range = await asyncio.gather(
-            conn.fetchval(f"SELECT COUNT(*) FROM {table_name}"),
-            conn.fetch(f"SELECT message_id, COUNT(*) as count FROM {table_name} GROUP BY message_id ORDER BY message_id"),
-            conn.fetch(f"SELECT DATE_TRUNC('hour', timestamp) as hour, COUNT(*) as count FROM {table_name} WHERE timestamp IS NOT NULL GROUP BY hour ORDER BY hour"),
-            conn.fetchrow(f"SELECT MIN(timestamp) as min_time, MAX(timestamp) as max_time FROM {table_name} WHERE timestamp IS NOT NULL")
+        total_records, message_dist = await asyncio.gather(
+            conn.fetchval(f"SELECT COUNT(*) FROM {safe_name}"),
+            conn.fetch(f"SELECT message_id, COUNT(*) as count FROM {safe_name} GROUP BY message_id ORDER BY message_id")
         )
         
-        stats = {
+        return {
             'total_records': total_records,
-            'message_distribution': [dict(row) for row in message_dist],
-            'hourly_distribution': [{'hour': row['hour'].isoformat() if row['hour'] else None, 'count': row['count']} for row in hourly_dist]
+            'message_distribution': [dict(row) for row in message_dist]
         }
-        
-        if time_range['min_time'] and time_range['max_time']:
-            stats['time_range'] = {
-                'start': time_range['min_time'].isoformat(),
-                'end': time_range['max_time'].isoformat()
-            }
-        
-        return stats
 
 if __name__ == "__main__":
     import uvicorn
