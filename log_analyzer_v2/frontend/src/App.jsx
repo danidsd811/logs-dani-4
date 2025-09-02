@@ -218,6 +218,16 @@ function UploadTab({ onUploadSuccess, uploadStatus }) {
   const [serverType, setServerType] = useState('eDS');
   const [logFile, setLogFile] = useState(null);
   const [configFile, setConfigFile] = useState(null);
+  const logInputRef = React.useRef();
+  const configInputRef = React.useRef();
+
+  // Limpiar archivos al cambiar de tecnología
+  useEffect(() => {
+    setLogFile(null);
+    setConfigFile(null);
+    if (logInputRef.current) logInputRef.current.value = '';
+    if (configInputRef.current) configInputRef.current.value = '';
+  }, [serverType]);
   const [uploading, setUploading] = useState(false);
   const [processingTime, setProcessingTime] = useState(0);
   const [timer, setTimer] = useState(null);
@@ -331,6 +341,7 @@ function UploadTab({ onUploadSuccess, uploadStatus }) {
               type="file"
               accept={serverType === 'eDS' ? '.log' : '.fsc'}
               onChange={(e) => setLogFile(e.target.files[0])}
+              ref={logInputRef}
               className="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
             />
           </div>
@@ -344,6 +355,7 @@ function UploadTab({ onUploadSuccess, uploadStatus }) {
               type="file"
               accept={serverType === 'eDS' ? '.json' : '.xml'}
               onChange={(e) => setConfigFile(e.target.files[0])}
+              ref={configInputRef}
               className="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
             />
           </div>
@@ -354,7 +366,7 @@ function UploadTab({ onUploadSuccess, uploadStatus }) {
               type="submit"
               disabled={uploading || !logFile || !configFile}
               className={
-                'w-full flex justify-center items-center py-1.5 px-4 rounded-md text-sm font-semibold transition-colors duration-200 ' +
+                'w-full flex justify-center items-center py-2.5 px-8 rounded-lg text-base font-semibold transition-colors duration-200 ' +
                 (uploading
                   ? 'bg-gradient-to-r from-blue-400 via-blue-500 to-indigo-500 border-2 border-blue-300 shadow-lg text-white'
                   : (!logFile || !configFile)
@@ -365,7 +377,7 @@ function UploadTab({ onUploadSuccess, uploadStatus }) {
             >
               {uploading ? (
                 <>
-                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-3"></div>
+                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-white mr-3"></div>
                   <span className="tracking-wide">Processing... {processingTime.toFixed(1)}s</span>
                 </>
               ) : (

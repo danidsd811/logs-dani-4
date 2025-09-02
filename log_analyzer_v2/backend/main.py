@@ -17,6 +17,9 @@ import xml.etree.ElementTree as ET
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# *** NUEVO: Constante para rotación de tablas ***
+MAX_TABLES = 10
+
 app = FastAPI(title="Log Analyzer - Ultra Optimized", version="4.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -28,6 +31,51 @@ TIMESTAMP_PATTERNS = [
     re.compile(r'^(\d{2})/(\d{2})/(\d{4}) (\d{2}):(\d{2}):(\d{2})\.(\d{3})$'),
     re.compile(r'^(\d{2})/(\d{2})/(\d{4}) (\d{2}):(\d{2}):(\d{2})$')
 ]
+
+# *** NUEVA FUNCIÓN: Sistema de rotación automática ***
+async def cleanup_old_tables():
+    """Mantener máximo 10 tablas, eliminar las más antiguas"""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # VERIFICAR que la tabla databases existe antes de hacer queries
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'databases'
+            )
+        """)
+        
+        if not table_exists:
+            logger.info("Table 'databases' does not exist yet - skipping cleanup")
+            return
+        
+        # Obtener todas las tablas ordenadas por fecha de creación
+        tables = await conn.fetch("""
+            SELECT id, table_name, created_at, record_count 
+            FROM databases 
+            ORDER BY created_at ASC
+        """)
+        
+        if len(tables) > MAX_TABLES:
+            tables_to_delete = tables[:-MAX_TABLES]  # Mantener solo las últimas 10
+            
+            for table in tables_to_delete:
+                table_name = table['table_name']
+                try:
+                    # Eliminar la tabla física
+                    await conn.execute(f"DROP TABLE IF EXISTS {table_name} CASCADE")
+                    
+                    # Eliminar registro de metadatos
+                    await conn.execute("DELETE FROM databases WHERE id = $1", table['id'])
+                    
+                    logger.info(f"Deleted old table: {table_name} ({table['record_count']:,} records)")
+                    
+                except Exception as e:
+                    logger.error(f"Error deleting table {table_name}: {e}")
+            
+            logger.info(f"Cleanup complete: Removed {len(tables_to_delete)} old tables")
+        else:
+            logger.info(f"Current tables: {len(tables)}/{MAX_TABLES} - no cleanup needed")
 
 # Models
 class ProcessResponse(BaseModel):
@@ -577,6 +625,9 @@ async def process_ultra_fast(log_path: str, config: Dict, database_id: str, file
         for line in f:
             lines_read += 1
             
+            # Limpiar caracteres problemáticos ANTES del parsing
+            line = line.replace('\x00', '').replace('\r', '').strip()
+            
             record_array = schema.parse_line_ultra_fast(line)
             if record_array:
                 batch.append(tuple(record_array))
@@ -607,6 +658,9 @@ async def process_ultra_fast(log_path: str, config: Dict, database_id: str, file
             INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info)
             VALUES ($1, $1, $2, $3, $4, $5)
         """, database_id, table_name, total_processed, file_size_mb, json.dumps(column_names))
+    
+    # *** LIMPIEZA DESPUÉS de guardar - ahora que tenemos la nueva tabla ***
+    await cleanup_old_tables()
     
     logger.info(f"ULTRA-FAST COMPLETE: {total_processed:,} records in {processing_time:.2f}s ({speed:,.0f} rec/sec)")
     
@@ -646,8 +700,10 @@ async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: st
     
     with open(fsc_path, 'r', encoding='utf-8', errors='ignore') as f:
         for line in f:
-            line = line.replace('\x00', '')
             lines_read += 1
+            
+            # Limpieza robusta de caracteres problemáticos
+            line = line.replace('\x00', '').replace('\r', '').strip()
             
             record_array = schema.parse_line_ultra_fast(line)
             if record_array:
@@ -685,6 +741,9 @@ async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: st
             INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info)
             VALUES ($1, $1, $2, $3, $4, $5)
         """, database_id, table_name, total_processed, file_size_mb, json.dumps(column_names))
+    
+    # *** LIMPIEZA DESPUÉS de guardar - ahora que tenemos la nueva tabla ***
+    await cleanup_old_tables()
     
     logger.info(f"SCNET COMPLETE: {total_processed:,} records in {processing_time:.2f}s ({speed:,.0f} rec/sec)")
     
