@@ -14,6 +14,7 @@ function LogAnalyzerApp() {
   const [loading, setLoading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState(null);
   const [inductionQuality, setInductionQuality] = useState(null);
+  const [badHostpics, setBadHostpics] = useState(null);
 
   // Estados para filtros
   const [searchTerm, setSearchTerm] = useState('');
@@ -81,6 +82,7 @@ function LogAnalyzerApp() {
   const fetchInductionQuality = async (databaseId) => {
     if (!databaseId) return;
     setInductionQuality(null);
+    setBadHostpics(null);
     try {
       const response = await fetch(`${API_BASE}/databases/${databaseId}/induction_quality`);
       const data = await response.json();
@@ -88,6 +90,14 @@ function LogAnalyzerApp() {
     } catch (error) {
       console.error('Error fetching induction quality:', error);
       setInductionQuality({ data: [] });
+    }
+    try {
+      const response = await fetch(`${API_BASE}/databases/${databaseId}/bad_hostpics`);
+      const data = await response.json();
+      setBadHostpics(data);
+    } catch (error) {
+      console.error('Error fetching bad hostpics:', error);
+      setBadHostpics({ data: [], total: 0 });
     }
   };
 
@@ -214,6 +224,7 @@ function LogAnalyzerApp() {
             onDatabaseSelect={setSelectedDatabase}
             loading={loading}
             inductionQuality={inductionQuality}
+            badHostpics={badHostpics}
           />
         )}
       </main>
@@ -768,7 +779,7 @@ function ViewLogsTab({
 }
 
 // Componente de Gráficos y Análisis
-function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, inductionQuality }) {
+function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, inductionQuality, badHostpics }) {
   if (!selectedDatabase) {
     return (
       <div className="text-center py-12">
@@ -932,6 +943,123 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
         </div>
       )}
 
+      {/* HOSTPICs incorrectos */}
+      {badHostpics === null ? (
+        <div className="bg-white p-6 rounded-lg shadow flex items-center justify-center h-24">
+          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-red-500"></div>
+          <span className="ml-3 text-gray-500 text-sm">Cargando HOSTPICs incorrectos...</span>
+        </div>
+      ) : badHostpics.data && badHostpics.data.length > 0 ? (
+        <BadHostpicsTable data={badHostpics.data} total={badHostpics.total} />
+      ) : null}
+
+    </div>
+  );
+}
+
+function BadHostpicsTable({ data, total }) {
+  const [search, setSearch] = useState('');
+  const [filterInfeed, setFilterInfeed] = useState('');
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 50;
+
+  const infeeds = [...new Set(data.map(r => r.infeed))].sort();
+
+  const filtered = data.filter(r => {
+    const matchSearch = !search || r.hostpic.toLowerCase().includes(search.toLowerCase());
+    const matchInfeed = !filterInfeed || r.infeed === filterInfeed;
+    return matchSearch && matchInfeed;
+  });
+
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  const handleSearch = (val) => { setSearch(val); setPage(1); };
+  const handleInfeed = (val) => { setFilterInfeed(val); setPage(1); };
+
+  const copyAll = () => {
+    const text = filtered.map(r => r.hostpic).join('\n');
+    navigator.clipboard.writeText(text);
+  };
+
+  return (
+    <div className="bg-white rounded-lg shadow">
+      <div className="px-6 py-4 border-b flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h3 className="text-lg font-semibold text-gray-900">HOSTPICs inducidos incorrectamente</h3>
+          <p className="text-xs text-gray-500 mt-0.5">
+            msg21 + lastDest=998 — {total.toLocaleString()} únicos en total
+            {filtered.length !== total && ` (${filtered.length.toLocaleString()} filtrados)`}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            type="text"
+            placeholder="Buscar HOSTPIC..."
+            value={search}
+            onChange={e => handleSearch(e.target.value)}
+            className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-red-400 w-48"
+          />
+          <select
+            value={filterInfeed}
+            onChange={e => handleInfeed(e.target.value)}
+            className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-red-400"
+          >
+            <option value="">Todos los infeeds</option>
+            {infeeds.map(inf => <option key={inf} value={inf}>{inf}</option>)}
+          </select>
+          <button
+            onClick={copyAll}
+            className="px-3 py-1.5 text-sm bg-red-50 border border-red-200 text-red-700 rounded hover:bg-red-100 font-medium"
+            title="Copiar todos los HOSTPICs filtrados al portapapeles"
+          >
+            Copiar lista
+          </button>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm divide-y divide-gray-200">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">#</th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">HOSTPIC</th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">INFEED</th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Entry Point</th>
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-100">
+            {paged.map((row, idx) => (
+              <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                <td className="px-4 py-2 text-gray-400 text-xs">{(page - 1) * PAGE_SIZE + idx + 1}</td>
+                <td className="px-4 py-2 font-mono font-semibold text-red-700">{row.hostpic}</td>
+                <td className="px-4 py-2">
+                  <span className="px-2 py-0.5 bg-red-100 text-red-800 rounded-full text-xs font-medium">{row.infeed}</span>
+                </td>
+                <td className="px-4 py-2 font-mono text-gray-500 text-xs">{row.entry_point}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {totalPages > 1 && (
+        <div className="px-6 py-3 border-t flex items-center justify-between text-sm text-gray-600">
+          <span>Página {page} de {totalPages}</span>
+          <div className="flex gap-2">
+            <button
+              disabled={page === 1}
+              onClick={() => setPage(p => p - 1)}
+              className="px-3 py-1 border rounded disabled:opacity-40 hover:bg-gray-50"
+            >Anterior</button>
+            <button
+              disabled={page === totalPages}
+              onClick={() => setPage(p => p + 1)}
+              className="px-3 py-1 border rounded disabled:opacity-40 hover:bg-gray-50"
+            >Siguiente</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1098,6 +1098,53 @@ async def get_induction_quality(database_id: str):
             }
         }
 
+@app.get("/databases/{database_id}/bad_hostpics")
+async def get_bad_hostpics(database_id: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        db_info = await conn.fetchrow(
+            "SELECT table_name, columns_info FROM databases WHERE id = $1",
+            database_id
+        )
+        if not db_info:
+            raise HTTPException(404, "Database not found")
+
+        table_name = db_info['table_name']
+        columns = json.loads(db_info['columns_info'] or '[]')
+        safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+
+        hostpic_col = next((c for c in columns if c.lower() == 'hostpic'), None)
+        lastdest_col = next((c for c in columns if 'lastdestination' in c.lower() or c.lower() in ('last_destination', 'lastdestination')), None)
+        entrypoint_col = next((c for c in columns if c.lower() in ('parcel_entry_point', 'parcelentrypoint', 'entrance_point', 'entrypoint', 'entry_point') or 'parcelentrypoint' in c.lower()), None)
+
+        if not all([hostpic_col, lastdest_col, entrypoint_col]):
+            return {"data": [], "total": 0}
+
+        bad_rows = await conn.fetch(f"""
+            SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col}
+            FROM {safe_table}
+            WHERE message_id = 21
+            AND TRIM({lastdest_col}) = '998'
+            AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
+            AND TRIM({entrypoint_col}) NOT IN ('-', '')
+            ORDER BY {hostpic_col}, {entrypoint_col}
+        """)
+
+        data = []
+        for row in bad_rows:
+            ep = str(row[entrypoint_col] or '')
+            infeed = get_infeed_number(ep)
+            data.append({
+                'hostpic': str(row[hostpic_col] or ''),
+                'entry_point': ep,
+                'infeed': f'INFEED {infeed}' if infeed else 'Desconocido'
+            })
+
+        data.sort(key=lambda x: (x['infeed'], x['hostpic']))
+
+        return {"data": data, "total": len(data)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
