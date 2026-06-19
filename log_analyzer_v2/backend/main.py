@@ -4,7 +4,6 @@ import tempfile
 import os
 import json
 import re
-import asyncio
 from typing import List, Optional, Dict, Any, Tuple
 from pydantic import BaseModel
 from datetime import datetime
@@ -20,11 +19,36 @@ logger = logging.getLogger(__name__)
 # *** NUEVO: Constante para rotación de tablas ***
 MAX_TABLES = 10
 
+INFEED_MAPPING = {
+    1: {'04', '05', '06', '07', '08', '09'},
+    2: {'10', '11', '12', '13', '14'},
+    3: {'15', '16', '17', '18', '19'},
+    4: {'20', '21', '22', '23', '24'},
+    5: {'25', '26', '27'},
+    6: {'28', '29', '30'},
+    7: {'55', '56', '57', '58', '59'},
+    8: {'60', '61', '63', '64'},
+    9: {'65', '66', '67', '68', '69'},
+    10: {'70', '71', '72', '73', '74'},
+}
+
 app = FastAPI(title="Log Analyzer - Ultra Optimized", version="4.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://loguser:logpass@postgres:5432/logs_analyzer")
 db_pool = None
+
+def get_infeed_number(entry_point: str) -> Optional[int]:
+    """Determina el número de infeed a partir del parcel entry point (ej: 0050.61.04.PEC31 → 8)"""
+    if not entry_point or entry_point.strip() in ('-', ''):
+        return None
+    match = re.search(r'0*50\.(\d{2})\.', entry_point.strip())
+    if match:
+        xx = match.group(1)
+        for infeed_num, codes in INFEED_MAPPING.items():
+            if xx in codes:
+                return infeed_num
+    return None
 
 # Regex compilados para timestamp parsing ultra-rápido
 TIMESTAMP_PATTERNS = [
@@ -651,9 +675,23 @@ async def process_ultra_fast(log_path: str, config: Dict, database_id: str, file
     processing_time = time.time() - start_time
     speed = total_processed / processing_time if processing_time > 0 else 0
     
-    # Guardar metadatos
+    # Guardar metadatos - CON VERIFICACIÓN ROBUSTA
     column_names = [col[0] for col in schema.columns]
     async with pool.acquire() as conn:
+        # Asegurar que la tabla databases existe antes de insertar
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS databases (
+                id VARCHAR(100) PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                table_name VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                record_count INTEGER DEFAULT 0,
+                file_size_mb FLOAT DEFAULT 0,
+                columns_info JSONB
+            )
+        """)
+        
+        # Ahora insertar los metadatos
         await conn.execute("""
             INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info)
             VALUES ($1, $1, $2, $3, $4, $5)
@@ -734,9 +772,23 @@ async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: st
     skip_rate = (lines_skipped / lines_read) * 100 if lines_read > 0 else 0
     logger.info(f"SCNET Final Stats: {lines_read:,} lines read, {total_processed:,} records, {lines_skipped:,} skipped ({skip_rate:.1f}%)")
     
-    # Guardar metadatos
+    # Guardar metadatos - CON VERIFICACIÓN ROBUSTA
     column_names = [col[0] for col in schema.columns]
     async with pool.acquire() as conn:
+        # Asegurar que la tabla databases existe antes de insertar
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS databases (
+                id VARCHAR(100) PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                table_name VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                record_count INTEGER DEFAULT 0,
+                file_size_mb FLOAT DEFAULT 0,
+                columns_info JSONB
+            )
+        """)
+        
+        # Ahora insertar los metadatos
         await conn.execute("""
             INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info)
             VALUES ($1, $1, $2, $3, $4, $5)
@@ -921,7 +973,7 @@ async def query_logs(database_id: str, query: LogQuery):
         offset = (query.page - 1) * query.limit
         rows = await conn.fetch(f"""
             SELECT * FROM {table_name} {where_clause}
-            ORDER BY timestamp DESC LIMIT {query.limit} OFFSET {offset}
+            ORDER BY timestamp ASC LIMIT {query.limit} OFFSET {offset}
         """, *params)
         
         data = [{k: v.isoformat() if isinstance(v, datetime) else v 
@@ -949,14 +1001,101 @@ async def get_table_stats(table_name: str):
         if not exists:
             raise HTTPException(404, "Table not found")
         
-        total_records, message_dist = await asyncio.gather(
-            conn.fetchval(f"SELECT COUNT(*) FROM {safe_name}"),
-            conn.fetch(f"SELECT message_id, COUNT(*) as count FROM {safe_name} GROUP BY message_id ORDER BY message_id")
-        )
+        total_records = await conn.fetchval(f"SELECT COUNT(*) FROM {safe_name}")
+        message_dist = await conn.fetch(f"SELECT message_id, COUNT(*) as count FROM {safe_name} GROUP BY message_id ORDER BY message_id")
         
         return {
             'total_records': total_records,
             'message_distribution': [dict(row) for row in message_dist]
+        }
+
+@app.get("/databases/{database_id}/induction_quality")
+async def get_induction_quality(database_id: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        db_info = await conn.fetchrow(
+            "SELECT table_name, columns_info FROM databases WHERE id = $1",
+            database_id
+        )
+        if not db_info:
+            raise HTTPException(404, "Database not found")
+
+        table_name = db_info['table_name']
+        columns = json.loads(db_info['columns_info'] or '[]')
+        safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+
+        # Buscar columnas requeridas (tolerante a variaciones de nombre)
+        hostpic_col = next((c for c in columns if c.lower() == 'hostpic'), None)
+        lastdest_col = next((c for c in columns if 'lastdestination' in c.lower() or c.lower() in ('last_destination', 'lastdestination')), None)
+        entrypoint_col = next((c for c in columns if c.lower() in ('parcel_entry_point', 'parcelentrypoint', 'entrance_point', 'entrypoint', 'entry_point') or 'parcelentrypoint' in c.lower()), None)
+
+        if not all([hostpic_col, lastdest_col, entrypoint_col]):
+            return {
+                "data": [],
+                "columns_found": {
+                    "hostpic": hostpic_col,
+                    "last_destination": lastdest_col,
+                    "parcel_entry_point": entrypoint_col
+                }
+            }
+
+        # Paquetes mal inducidos: mensaje 21 con lastdestination = '998'
+        bad_rows = await conn.fetch(f"""
+            SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col}
+            FROM {safe_table}
+            WHERE message_id = 21
+            AND TRIM({lastdest_col}) = '998'
+            AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
+            AND TRIM({entrypoint_col}) NOT IN ('-', '')
+            ORDER BY {hostpic_col}, {entrypoint_col}
+        """)
+
+        # Paquetes bien inducidos: mensaje 20 con lastdestination != '998'
+        good_rows = await conn.fetch(f"""
+            SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col}
+            FROM {safe_table}
+            WHERE message_id = 20
+            AND TRIM({lastdest_col}) != '998'
+            AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
+            AND TRIM({entrypoint_col}) NOT IN ('-', '')
+            ORDER BY {hostpic_col}, {entrypoint_col}
+        """)
+
+        infeed_stats = {i: {'good': 0, 'bad': 0} for i in range(1, 11)}
+
+        for row in good_rows:
+            infeed = get_infeed_number(str(row[entrypoint_col] or ''))
+            if infeed:
+                infeed_stats[infeed]['good'] += 1
+
+        for row in bad_rows:
+            infeed = get_infeed_number(str(row[entrypoint_col] or ''))
+            if infeed:
+                infeed_stats[infeed]['bad'] += 1
+
+        result = []
+        for i in range(1, 11):
+            good = infeed_stats[i]['good']
+            bad = infeed_stats[i]['bad']
+            total = good + bad
+            if total > 0:
+                result.append({
+                    'infeed': f'INFEED {i}',
+                    'infeed_num': i,
+                    'good': good,
+                    'bad': bad,
+                    'total': total,
+                    'good_pct': round((good / total) * 100, 1),
+                    'bad_pct': round((bad / total) * 100, 1)
+                })
+
+        return {
+            'data': result,
+            'columns_used': {
+                'hostpic': hostpic_col,
+                'last_destination': lastdest_col,
+                'parcel_entry_point': entrypoint_col
+            }
         }
 
 if __name__ == "__main__":

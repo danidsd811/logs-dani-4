@@ -1,11 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Upload, Search, Database, FileText, X, BarChart3, Clock, Activity, ChevronLeft, ChevronRight } from 'lucide-react';
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { Upload, Search, Database, FileText, X, BarChart3, Activity, ChevronLeft, ChevronRight } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const API_BASE = 'http://localhost:8000';
 
 // Colores para gráficos
-const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316'];
 
 function LogAnalyzerApp() {
   const [activeTab, setActiveTab] = useState('upload');
@@ -14,7 +13,7 @@ function LogAnalyzerApp() {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState(null);
-  const [tableStats, setTableStats] = useState(null);
+  const [inductionQuality, setInductionQuality] = useState(null);
 
   // Estados para filtros
   const [searchTerm, setSearchTerm] = useState('');
@@ -26,6 +25,15 @@ function LogAnalyzerApp() {
   // Cargar bases de datos al iniciar
   useEffect(() => {
     fetchDatabases();
+  }, []);
+
+  // CORREGIDO: Función global para refresh desde ViewLogsTab
+  useEffect(() => {
+    window.refreshDatabases = fetchDatabases;
+  
+    return () => {
+      window.refreshDatabases = null;
+    };
   }, []);
 
   const fetchDatabases = async () => {
@@ -70,16 +78,16 @@ function LogAnalyzerApp() {
     }
   };
 
-  const fetchTableStats = async (tableName) => {
-    if (!tableName) return;
-    
+  const fetchInductionQuality = async (databaseId) => {
+    if (!databaseId) return;
+    setInductionQuality(null);
     try {
-      const response = await fetch(`${API_BASE}/table/${tableName}/stats`);
+      const response = await fetch(`${API_BASE}/databases/${databaseId}/induction_quality`);
       const data = await response.json();
-      setTableStats(data);
+      setInductionQuality(data);
     } catch (error) {
-      console.error('Error fetching stats:', error);
-      setTableStats(null);
+      console.error('Error fetching induction quality:', error);
+      setInductionQuality({ data: [] });
     }
   };
 
@@ -89,7 +97,7 @@ function LogAnalyzerApp() {
       if (activeTab === 'view') {
         fetchLogs(1, searchTerm);
       } else if (activeTab === 'charts') {
-        fetchTableStats(selectedDatabase.table_name);
+        fetchInductionQuality(selectedDatabase.id);
       }
     }
   }, [selectedDatabase, activeTab]);
@@ -204,8 +212,8 @@ function LogAnalyzerApp() {
             databases={databases}
             selectedDatabase={selectedDatabase}
             onDatabaseSelect={setSelectedDatabase}
-            tableStats={tableStats}
             loading={loading}
+            inductionQuality={inductionQuality}
           />
         )}
       </main>
@@ -431,6 +439,42 @@ function ViewLogsTab({
   onPageChange,
   columns
 }) {
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Función para refrescar databases - CORREGIDA para evitar duplicados
+  const handleRefreshDatabases = async () => {
+    setRefreshing(true);
+    try {
+      const response = await fetch(`${API_BASE}/databases`);
+      const data = await response.json();
+      
+      // Llamar directamente a fetchDatabases del componente padre para evitar duplicados
+      if (window.refreshDatabases) {
+        window.refreshDatabases();
+      }
+    } catch (error) {
+      console.error('Error refreshing databases:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // Función para resaltar coincidencias de búsqueda
+  const highlightSearchTerm = (text, searchTerm) => {
+    if (!searchTerm || !text) return text;
+    
+    const regex = new RegExp(`(${searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+    const parts = text.toString().split(regex);
+    
+    return parts.map((part, index) => 
+      regex.test(part) ? (
+        <span key={index} className="bg-yellow-200 px-1 rounded">
+          {part}
+        </span>
+      ) : part
+    );
+  };
+
   // Usar columnas del API o extraer dinámicamente de los logs
   const displayColumns = useMemo(() => {
     if (columns && columns.length > 0) {
@@ -478,56 +522,83 @@ function ViewLogsTab({
 
   return (
     <div className="space-y-6">
-      {/* Database Selection & Search */}
-  <div className="bg-white shadow p-6">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between space-y-4 md:space-y-0">
-          {/* Database Selector */}
+      {/* Database & Search Controls - DISEÑO COMPACTO */}
+      <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 shadow rounded-lg p-4">
+        <div className="flex items-center justify-between">
+          
+          {/* Lado Izquierdo: Database Selection */}
           <div className="flex items-center space-x-4">
-            <label className="text-sm font-medium text-gray-700">Database:</label>
+            <div className="flex items-center space-x-2">
+              <Database className="h-5 w-5 text-blue-600" />
+              <label className="text-sm font-semibold text-gray-800">
+                Active Database:
+              </label>
+            </div>
+            
             <select
               value={selectedDatabase?.id || ''}
               onChange={(e) => {
                 const db = databases.find(d => d.id === e.target.value);
                 onDatabaseSelect(db);
               }}
-              className="block w-64 pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md"
+              className="block w-72 pl-3 pr-8 py-2 text-sm border border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 rounded-md font-medium bg-white"
             >
-              {databases.map(db => (
-                <option key={db.id} value={db.id}>
-                  {db.table_name} ({db.record_count?.toLocaleString()} records)
-                </option>
-              ))}
+              {databases.length === 0 ? (
+                <option value="">No databases available</option>
+              ) : (
+                databases.map(db => (
+                  <option key={db.id} value={db.id}>
+                    {db.table_name} ({db.record_count?.toLocaleString() || '0'} records) - {new Date(db.created_at).toLocaleDateString()}
+                  </option>
+                ))
+              )}
             </select>
+            
+            <button
+              onClick={handleRefreshDatabases}
+              disabled={refreshing}
+              className="inline-flex items-center px-2 py-2 border border-blue-300 rounded-md text-sm font-medium text-blue-700 bg-white hover:bg-blue-50 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+              title="Refresh database list"
+            >
+              <svg className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </button>
           </div>
 
-          {/* Search */}
+          {/* Lado Derecho: Search Controls */}
           <div className="flex items-center space-x-2">
+            <label className="text-sm font-semibold text-gray-800">
+              Search:
+            </label>
             <div className="relative">
               <input
                 type="text"
-                placeholder="Search in all fields..."
+                placeholder="Search records..."
                 value={searchTerm}
                 onChange={(e) => onSearchTermChange(e.target.value)}
                 onKeyPress={(e) => e.key === 'Enter' && onSearch()}
-                className="block w-80 pl-10 pr-4 py-2 border border-gray-300 rounded-md leading-5 bg-white placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                className="block w-64 pl-8 pr-3 py-2 border border-gray-300 rounded-md text-sm bg-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
               />
-              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                <Search className="h-5 w-5 text-gray-400" />
+              <div className="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none">
+                <Search className="h-4 w-4 text-gray-400" />
               </div>
             </div>
+            
             <button
               onClick={onSearch}
-              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+              className="inline-flex items-center px-3 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
             >
               Search
             </button>
+            
             {searchTerm && (
               <button
                 onClick={() => {
                   onSearchTermChange('');
                   onSearch();
                 }}
-                className="inline-flex items-center px-3 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                className="inline-flex items-center px-2 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-1 focus:ring-blue-500"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -535,15 +606,30 @@ function ViewLogsTab({
           </div>
         </div>
 
-        {/* Search Results Info */}
-        {searchTerm && (
-          <div className="mt-4 text-sm text-gray-600">
-            Found <strong>{totalRecords.toLocaleString()}</strong> records for "{searchTerm}"
+        {/* Database Info - Posición inferior */}
+        {selectedDatabase && (
+          <div className="mt-3 flex items-center justify-between">
+            <div className="bg-white rounded px-3 py-2 text-xs text-gray-700 border border-blue-100">
+              <span className="font-semibold">{selectedDatabase.table_name}</span>
+              <span className="mx-2">•</span>
+              <span>{selectedDatabase.record_count?.toLocaleString() || '0'} total records</span>
+              <span className="mx-2">•</span>
+              <span>Created: {new Date(selectedDatabase.created_at).toLocaleDateString()}</span>
+              <span className="mx-2">•</span>
+              <span>Size: {selectedDatabase.file_size_mb?.toFixed(1) || '0'} MB</span>
+            </div>
+
+            {/* Search Results Info */}
+            {searchTerm && (
+              <div className="bg-yellow-100 border border-yellow-300 rounded px-3 py-1 text-xs text-yellow-800">
+                Found <strong>{totalRecords.toLocaleString()}</strong> records matching "{searchTerm}"
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      {/* Data Table */}
+      {/* Data Table con búsqueda resaltada */}
       <div className="bg-white shadow rounded-lg overflow-hidden">
         {loading ? (
           <div className="flex items-center justify-center h-64">
@@ -560,7 +646,7 @@ function ViewLogsTab({
           </div>
         ) : (
           <>
-            {/* Table */}
+            {/* Table con resaltado de búsqueda */}
             <div className="overflow-x-auto max-h-96">
               <table className="min-w-full divide-y divide-gray-200">
                 <thead className="bg-blue-50 sticky top-0">
@@ -578,14 +664,23 @@ function ViewLogsTab({
                 <tbody className="bg-white divide-y divide-gray-200">
                   {logs.map((log, index) => (
                     <tr key={index} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                      {displayColumns.map(column => (
-                        <td key={column} className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                          {column === 'timestamp' && log[column]
-                            ? new Date(log[column]).toLocaleString()
-                            : log[column] || '-'
-                          }
-                        </td>
-                      ))}
+                      {displayColumns.map(column => {
+                        let cellValue = '';
+                        if (column === 'timestamp' && log[column]) {
+                          cellValue = new Date(log[column]).toLocaleString();
+                        } else {
+                          cellValue = log[column] || '-';
+                        }
+
+                        return (
+                          <td key={column} className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {searchTerm && cellValue !== '-' ? 
+                              highlightSearchTerm(cellValue, searchTerm) : 
+                              cellValue
+                            }
+                          </td>
+                        );
+                      })}
                     </tr>
                   ))}
                 </tbody>
@@ -673,7 +768,7 @@ function ViewLogsTab({
 }
 
 // Componente de Gráficos y Análisis
-function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, tableStats, loading }) {
+function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, inductionQuality }) {
   if (!selectedDatabase) {
     return (
       <div className="text-center py-12">
@@ -693,213 +788,150 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, tableStats, 
     );
   }
 
-  if (!tableStats) {
-    return (
-      <div className="text-center py-12">
-        <Activity className="mx-auto h-12 w-12 text-gray-400" />
-        <h3 className="mt-2 text-sm font-medium text-gray-900">No statistics available</h3>
-        <p className="mt-1 text-sm text-gray-500">Statistics will appear after processing data</p>
-      </div>
-    );
-  }
-
-  // Preparar datos para gráficos
-  const messageDistData = tableStats.message_distribution || [];
-  const hourlyData = tableStats.hourly_distribution?.map(item => ({
-    ...item,
-    hour: item.hour ? new Date(item.hour).getHours() + ':00' : 'Unknown'
-  })) || [];
-
-  // Datos para el gráfico de pastel - Top 10 message IDs
-  const pieData = messageDistData
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 10)
-    .map(item => ({
-      name: `Message ${item.message_id}`,
-      value: item.count
-    }));
-
   return (
     <div className="space-y-6">
-      {/* Database Selector */}
-      <div className="bg-white shadow rounded-lg p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center space-x-4">
-            <label className="text-sm font-medium text-gray-700">Database:</label>
-            <select
-              value={selectedDatabase?.id || ''}
-              onChange={(e)=> {
-                const db = databases.find(d => d.id === e.target.value);
-                onDatabaseSelect(db);
-              }}
-              className="block w-64 pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md"
-            >
-              {databases.map(db => (
-                <option key={db.id} value={db.id}>
-                  {db.table_name} ({db.record_count?.toLocaleString()} records)
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="text-sm text-gray-600">
-            Total Records: <span className="font-semibold text-lg">{tableStats.total_records?.toLocaleString()}</span>
-          </div>
-        </div>
-
-        {/* Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
-          <div className="bg-blue-50 p-4 rounded-lg">
-            <div className="flex items-center">
-              <Database className="h-8 w-8 text-blue-600" />
-              <div className="ml-3">
-                <p className="text-sm font-medium text-gray-600">Total Records</p>
-                <p className="text-2xl font-bold text-gray-900">
-                  {tableStats.total_records?.toLocaleString()}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-green-50 p-4 rounded-lg">
-            <div className="flex items-center">
-              <Activity className="h-8 w-8 text-green-600" />
-              <div className="ml-3">
-                <p className="text-sm font-medium text-gray-600">Unique Messages</p>
-                <p className="text-2xl font-bold text-gray-900">
-                  {messageDistData.length}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-purple-50 p-4 rounded-lg">
-            <div className="flex items-center">
-              <Clock className="h-8 w-8 text-purple-600" />
-              <div className="ml-3">
-                <p className="text-sm font-medium text-gray-600">Time Range</p>
-                <p className="text-sm font-bold text-gray-900">
-                  {tableStats.time_range ? 
-                    `${new Date(tableStats.time_range.start).toLocaleDateString()}` :
-                    'N/A'
-                  }
-                </p>
-              </div>
-            </div>
+      {/* Selector de base de datos */}
+      <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 shadow rounded-lg p-4">
+        <div className="flex items-center space-x-4">
+          <Database className="h-5 w-5 text-blue-600" />
+          <label className="text-sm font-semibold text-gray-800">Active Database:</label>
+          <select
+            value={selectedDatabase?.id || ''}
+            onChange={(e) => {
+              const db = databases.find(d => d.id === e.target.value);
+              onDatabaseSelect(db);
+            }}
+            className="block w-72 pl-3 pr-8 py-2 text-sm border border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-500 rounded-md font-medium bg-white"
+          >
+            {databases.map(db => (
+              <option key={db.id} value={db.id}>
+                {db.table_name} ({db.record_count?.toLocaleString() || '0'} records) - {new Date(db.created_at).toLocaleDateString()}
+              </option>
+            ))}
+          </select>
+          <div className="text-sm text-gray-600 bg-white rounded px-3 py-1 border border-blue-100">
+            <span className="font-semibold">{selectedDatabase.table_name}</span>
+            <span className="mx-2">•</span>
+            <span>{selectedDatabase.record_count?.toLocaleString()} records</span>
+            <span className="mx-2">•</span>
+            <span>{selectedDatabase.file_size_mb?.toFixed(1)} MB</span>
           </div>
         </div>
       </div>
 
-      {/* Charts Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Message Distribution Bar Chart */}
+      {/* Calidad de Inducción por Infeed */}
+      {inductionQuality !== null && (
         <div className="bg-white p-6 rounded-lg shadow">
-          <h3 className="text-lg font-medium text-gray-900 mb-4">Message Distribution</h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={messageDistData}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="message_id" />
-              <YAxis />
-              <Tooltip />
-              <Legend />
-              <Bar dataKey="count" fill="#3B82F6" />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+          <h3 className="text-lg font-medium text-gray-900 mb-1">Calidad de Inducción por Infeed</h3>
+          <p className="text-sm text-gray-500 mb-4">
+            Correctos: msg20 con lastDest≠998 &nbsp;|&nbsp; Incorrectos: msg21 con lastDest=998
+          </p>
 
-        {/* Top 10 Messages Pie Chart */}
-        <div className="bg-white p-6 rounded-lg shadow">
-          <h3 className="text-lg font-medium text-gray-900 mb-4">Top 10 Message Types</h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <PieChart>
-              <Pie
-                data={pieData}
-                cx="50%"
-                cy="50%"
-                labelLine={false}
-                label={(entry) => `${entry.name}: ${entry.value}`}
-                outerRadius={80}
-                fill="#8884d8"
-                dataKey="value"
-              >
-                {pieData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                ))}
-              </Pie>
-              <Tooltip />
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
-
-        {/* Hourly Distribution Line Chart */}
-        <div className="bg-white p-6 rounded-lg shadow lg:col-span-2">
-          <h3 className="text-lg font-medium text-gray-900 mb-4">Hourly Activity</h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={hourlyData}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="hour" />
-              <YAxis />
-              <Tooltip />
-              <Legend />
-              <Line type="monotone" dataKey="count" stroke="#10B981" strokeWidth={2} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      {/* Detailed Statistics Table */}
-      <div className="bg-white shadow rounded-lg overflow-hidden">
-        <div className="px-6 py-4 bg-gray-50 border-b">
-          <h3 className="text-lg font-medium text-gray-900">Message Type Details</h3>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Message ID
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Count
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Percentage
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Visual
-                </th>
-              </tr>
-            </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
-              {messageDistData.map((item, index) => {
-                const percentage = ((item.count / tableStats.total_records) * 100).toFixed(2);
+          {inductionQuality.data && inductionQuality.data.length > 0 ? (
+            <>
+              {(() => {
+                const totalGood = inductionQuality.data.reduce((s, d) => s + d.good, 0);
+                const totalBad  = inductionQuality.data.reduce((s, d) => s + d.bad,  0);
+                const totalAll  = totalGood + totalBad;
+                const globalPct = totalAll > 0 ? ((totalGood / totalAll) * 100).toFixed(1) : null;
                 return (
-                  <tr key={index}>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                      Message {item.message_id}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {item.count.toLocaleString()}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {percentage}%
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center">
-                        <div className="w-full bg-gray-200 rounded-full h-2.5">
-                          <div 
-                            className="bg-blue-600 h-2.5 rounded-full" 
-                            style={{width: `${Math.min(parseFloat(percentage) * 2, 100)}%`}}
-                          ></div>
-                        </div>
-                      </div>
-                    </td>
-                  </tr>
+                  <div className="grid grid-cols-3 gap-4 mb-6">
+                    <div className="bg-green-50 border border-green-200 p-4 rounded-lg">
+                      <p className="text-xs font-medium text-gray-500 uppercase">Total Correctos</p>
+                      <p className="text-2xl font-bold text-green-700 mt-1">{totalGood.toLocaleString()}</p>
+                    </div>
+                    <div className="bg-red-50 border border-red-200 p-4 rounded-lg">
+                      <p className="text-xs font-medium text-gray-500 uppercase">Total Incorrectos</p>
+                      <p className="text-2xl font-bold text-red-700 mt-1">{totalBad.toLocaleString()}</p>
+                    </div>
+                    <div className="bg-blue-50 border border-blue-200 p-4 rounded-lg">
+                      <p className="text-xs font-medium text-gray-500 uppercase">Calidad Global</p>
+                      <p className={`text-2xl font-bold mt-1 ${parseFloat(globalPct) >= 90 ? 'text-green-700' : parseFloat(globalPct) >= 70 ? 'text-yellow-600' : 'text-red-700'}`}>
+                        {globalPct !== null ? `${globalPct}%` : 'N/A'}
+                      </p>
+                    </div>
+                  </div>
                 );
-              })}
-            </tbody>
-          </table>
+              })()}
+
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={inductionQuality.data} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="infeed" tick={{ fontSize: 12 }} />
+                  <YAxis tick={{ fontSize: 12 }} />
+                  <Tooltip
+                    content={({ active, payload, label }) => {
+                      if (!active || !payload?.length) return null;
+                      const good  = payload.find(p => p.dataKey === 'good')?.value || 0;
+                      const bad   = payload.find(p => p.dataKey === 'bad')?.value  || 0;
+                      const total = good + bad;
+                      return (
+                        <div className="bg-white border border-gray-200 rounded-lg p-3 shadow text-sm">
+                          <p className="font-semibold text-gray-800 mb-2">{label}</p>
+                          <p className="text-green-600">✓ Correctos: {good.toLocaleString()} ({total ? ((good / total) * 100).toFixed(1) : 0}%)</p>
+                          <p className="text-red-600">✗ Incorrectos: {bad.toLocaleString()} ({total ? ((bad / total) * 100).toFixed(1) : 0}%)</p>
+                          <p className="text-gray-500 mt-2 border-t pt-1">Total: {total.toLocaleString()}</p>
+                        </div>
+                      );
+                    }}
+                  />
+                  <Legend formatter={(v) => v === 'good' ? 'Correctos' : 'Incorrectos'} />
+                  <Bar dataKey="good" name="good" stackId="s" fill="#10B981" />
+                  <Bar dataKey="bad"  name="bad"  stackId="s" fill="#EF4444" />
+                </BarChart>
+              </ResponsiveContainer>
+
+              <div className="mt-6 overflow-x-auto">
+                <table className="min-w-full text-sm divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Infeed</th>
+                      <th className="px-4 py-2 text-right text-xs font-medium text-green-600 uppercase">Correctos</th>
+                      <th className="px-4 py-2 text-right text-xs font-medium text-red-600 uppercase">Incorrectos</th>
+                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Total</th>
+                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">% Correctos</th>
+                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">% Incorrectos</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-100">
+                    {inductionQuality.data.map((row, idx) => (
+                      <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                        <td className="px-4 py-2 font-medium text-gray-900">{row.infeed}</td>
+                        <td className="px-4 py-2 text-right text-green-600 font-medium">{row.good.toLocaleString()}</td>
+                        <td className="px-4 py-2 text-right text-red-600 font-medium">{row.bad.toLocaleString()}</td>
+                        <td className="px-4 py-2 text-right font-semibold">{row.total.toLocaleString()}</td>
+                        <td className="px-4 py-2 text-right">
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${
+                            row.good_pct >= 90 ? 'bg-green-100 text-green-800' :
+                            row.good_pct >= 70 ? 'bg-yellow-100 text-yellow-800' :
+                                                  'bg-red-100 text-red-800'
+                          }`}>
+                            {row.good_pct}%
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 text-right text-gray-500">{row.bad_pct}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : (
+            <div className="text-center py-10 text-gray-400">
+              <Activity className="mx-auto h-10 w-10 mb-2 text-gray-300" />
+              <p className="text-sm">No se encontraron datos de inducción en esta base de datos.</p>
+              {inductionQuality.columns_found && (
+                <p className="text-xs mt-2">
+                  hostpic: {inductionQuality.columns_found.hostpic ? '✓' : '✗'}&nbsp;
+                  lastdestination: {inductionQuality.columns_found.last_destination ? '✓' : '✗'}&nbsp;
+                  parcelentrypoint: {inductionQuality.columns_found.parcel_entry_point ? '✓' : '✗'}
+                </p>
+              )}
+            </div>
+          )}
         </div>
-      </div>
+      )}
+
     </div>
   );
 }
