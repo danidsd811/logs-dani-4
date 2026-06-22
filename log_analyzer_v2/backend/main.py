@@ -20,16 +20,16 @@ logger = logging.getLogger(__name__)
 MAX_TABLES = 10
 
 INFEED_MAPPING = {
-    1: {'04', '05', '06', '07', '08', '09'},
+    1: {'05', '06', '07', '08', '09'},
     2: {'10', '11', '12', '13', '14'},
     3: {'15', '16', '17', '18', '19'},
     4: {'20', '21', '22', '23', '24'},
-    5: {'25', '26', '27'},
-    6: {'28', '29', '30'},
-    7: {'55', '56', '57', '58', '59'},
-    8: {'60', '61', '63', '64'},
-    9: {'65', '66', '67', '68', '69'},
-    10: {'70', '71', '72', '73', '74'},
+    5: {'55', '56', '57', '58', '59'},
+    6: {'60', '61', '63', '64'},
+    7: {'65', '66', '67', '68', '69'},
+    8: {'70', '71', '72', '73', '74'},
+    9: {'25', '26', '27'},
+    10: {'28', '29', '30'},
 }
 
 app = FastAPI(title="Log Analyzer - Ultra Optimized", version="4.0.0")
@@ -1028,6 +1028,7 @@ async def get_induction_quality(database_id: str):
         hostpic_col = next((c for c in columns if c.lower() == 'hostpic'), None)
         lastdest_col = next((c for c in columns if 'lastdestination' in c.lower() or c.lower() in ('last_destination', 'lastdestination')), None)
         entrypoint_col = next((c for c in columns if c.lower() in ('parcel_entry_point', 'parcelentrypoint', 'entrance_point', 'entrypoint', 'entry_point') or 'parcelentrypoint' in c.lower()), None)
+        origdeststate_col = next((c for c in columns if c.lower() in ('original_destination_state', 'originaldestinationstate')), None)
 
         if not all([hostpic_col, lastdest_col, entrypoint_col]):
             return {
@@ -1050,28 +1051,35 @@ async def get_induction_quality(database_id: str):
             ORDER BY {hostpic_col}, {entrypoint_col}
         """)
 
-        # Paquetes bien inducidos: mensaje 20 con lastdestination != '998'
+        # Paquetes bien inducidos: mensaje 20, lastdestination != '998', original_destination_state = 1
+        origdest_filter = f"AND TRIM({origdeststate_col}::text) = '1'" if origdeststate_col else ""
         good_rows = await conn.fetch(f"""
             SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col}
             FROM {safe_table}
             WHERE message_id = 20
             AND TRIM({lastdest_col}) != '998'
+            {origdest_filter}
             AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
             AND TRIM({entrypoint_col}) NOT IN ('-', '')
             ORDER BY {hostpic_col}, {entrypoint_col}
         """)
 
         infeed_stats = {i: {'good': 0, 'bad': 0} for i in range(1, 11)}
+        loop_stats = {'good': 0, 'bad': 0}
 
         for row in good_rows:
             infeed = get_infeed_number(str(row[entrypoint_col] or ''))
             if infeed:
                 infeed_stats[infeed]['good'] += 1
+            else:
+                loop_stats['good'] += 1
 
         for row in bad_rows:
             infeed = get_infeed_number(str(row[entrypoint_col] or ''))
             if infeed:
                 infeed_stats[infeed]['bad'] += 1
+            else:
+                loop_stats['bad'] += 1
 
         result = []
         for i in range(1, 11):
@@ -1088,6 +1096,20 @@ async def get_induction_quality(database_id: str):
                     'good_pct': round((good / total) * 100, 1),
                     'bad_pct': round((bad / total) * 100, 1)
                 })
+
+        loop_good = loop_stats['good']
+        loop_bad = loop_stats['bad']
+        loop_total = loop_good + loop_bad
+        if loop_total > 0:
+            result.append({
+                'infeed': 'Loop del Crossorter',
+                'infeed_num': 99,
+                'good': loop_good,
+                'bad': loop_bad,
+                'total': loop_total,
+                'good_pct': round((loop_good / loop_total) * 100, 1),
+                'bad_pct': round((loop_bad / loop_total) * 100, 1)
+            })
 
         return {
             'data': result,
@@ -1137,7 +1159,57 @@ async def get_bad_hostpics(database_id: str):
             data.append({
                 'hostpic': str(row[hostpic_col] or ''),
                 'entry_point': ep,
-                'infeed': f'INFEED {infeed}' if infeed else 'Desconocido'
+                'infeed': f'INFEED {infeed}' if infeed else 'Loop del Crossorter'
+            })
+
+        data.sort(key=lambda x: (x['infeed'], x['hostpic']))
+
+        return {"data": data, "total": len(data)}
+
+
+@app.get("/databases/{database_id}/good_hostpics")
+async def get_good_hostpics(database_id: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        db_info = await conn.fetchrow(
+            "SELECT table_name, columns_info FROM databases WHERE id = $1",
+            database_id
+        )
+        if not db_info:
+            raise HTTPException(404, "Database not found")
+
+        table_name = db_info['table_name']
+        columns = json.loads(db_info['columns_info'] or '[]')
+        safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+
+        hostpic_col = next((c for c in columns if c.lower() == 'hostpic'), None)
+        lastdest_col = next((c for c in columns if 'lastdestination' in c.lower() or c.lower() in ('last_destination', 'lastdestination')), None)
+        entrypoint_col = next((c for c in columns if c.lower() in ('parcel_entry_point', 'parcelentrypoint', 'entrance_point', 'entrypoint', 'entry_point') or 'parcelentrypoint' in c.lower()), None)
+        origdeststate_col = next((c for c in columns if c.lower() in ('original_destination_state', 'originaldestinationstate')), None)
+
+        if not all([hostpic_col, lastdest_col, entrypoint_col]):
+            return {"data": [], "total": 0}
+
+        origdest_filter = f"AND TRIM({origdeststate_col}::text) = '1'" if origdeststate_col else ""
+        good_rows = await conn.fetch(f"""
+            SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col}
+            FROM {safe_table}
+            WHERE message_id = 20
+            AND TRIM({lastdest_col}) != '998'
+            {origdest_filter}
+            AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
+            AND TRIM({entrypoint_col}) NOT IN ('-', '')
+            ORDER BY {hostpic_col}, {entrypoint_col}
+        """)
+
+        data = []
+        for row in good_rows:
+            ep = str(row[entrypoint_col] or '')
+            infeed = get_infeed_number(ep)
+            data.append({
+                'hostpic': str(row[hostpic_col] or ''),
+                'entry_point': ep,
+                'infeed': f'INFEED {infeed}' if infeed else 'Loop del Crossorter'
             })
 
         data.sort(key=lambda x: (x['infeed'], x['hostpic']))

@@ -15,6 +15,7 @@ function LogAnalyzerApp() {
   const [uploadStatus, setUploadStatus] = useState(null);
   const [inductionQuality, setInductionQuality] = useState(null);
   const [badHostpics, setBadHostpics] = useState(null);
+  const [goodHostpics, setGoodHostpics] = useState(null);
 
   // Estados para filtros
   const [searchTerm, setSearchTerm] = useState('');
@@ -83,6 +84,7 @@ function LogAnalyzerApp() {
     if (!databaseId) return;
     setInductionQuality(null);
     setBadHostpics(null);
+    setGoodHostpics(null);
     try {
       const response = await fetch(`${API_BASE}/databases/${databaseId}/induction_quality`);
       const data = await response.json();
@@ -98,6 +100,14 @@ function LogAnalyzerApp() {
     } catch (error) {
       console.error('Error fetching bad hostpics:', error);
       setBadHostpics({ data: [], total: 0 });
+    }
+    try {
+      const response = await fetch(`${API_BASE}/databases/${databaseId}/good_hostpics`);
+      const data = await response.json();
+      setGoodHostpics(data);
+    } catch (error) {
+      console.error('Error fetching good hostpics:', error);
+      setGoodHostpics({ data: [], total: 0 });
     }
   };
 
@@ -225,6 +235,7 @@ function LogAnalyzerApp() {
             loading={loading}
             inductionQuality={inductionQuality}
             badHostpics={badHostpics}
+            goodHostpics={goodHostpics}
           />
         )}
       </main>
@@ -779,7 +790,7 @@ function ViewLogsTab({
 }
 
 // Componente de Gráficos y Análisis
-function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, inductionQuality, badHostpics }) {
+function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, inductionQuality, badHostpics, goodHostpics }) {
   if (!selectedDatabase) {
     return (
       <div className="text-center py-12">
@@ -868,7 +879,7 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
               <ResponsiveContainer width="100%" height={300}>
                 <BarChart data={inductionQuality.data} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="infeed" tick={{ fontSize: 12 }} />
+                  <XAxis dataKey="infeed" tick={{ fontSize: 11 }} tickFormatter={(v) => v === 'Loop del Crossorter' ? 'Loop' : v} />
                   <YAxis tick={{ fontSize: 12 }} />
                   <Tooltip
                     content={({ active, payload, label }) => {
@@ -950,115 +961,165 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
           <span className="ml-3 text-gray-500 text-sm">Cargando HOSTPICs incorrectos...</span>
         </div>
       ) : badHostpics.data && badHostpics.data.length > 0 ? (
-        <BadHostpicsTable data={badHostpics.data} total={badHostpics.total} />
+        <HostpicsTable data={badHostpics.data} total={badHostpics.total} variant="bad" />
+      ) : null}
+
+      {/* HOSTPICs correctos */}
+      {goodHostpics === null ? (
+        <div className="bg-white p-6 rounded-lg shadow flex items-center justify-center h-24">
+          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-green-500"></div>
+          <span className="ml-3 text-gray-500 text-sm">Cargando HOSTPICs correctos...</span>
+        </div>
+      ) : goodHostpics.data && goodHostpics.data.length > 0 ? (
+        <HostpicsTable data={goodHostpics.data} total={goodHostpics.total} variant="good" />
       ) : null}
 
     </div>
   );
 }
 
-function BadHostpicsTable({ data, total }) {
+function HostpicsTable({ data, total, variant }) {
+  const isBad = variant === 'bad';
+  const [collapsed, setCollapsed] = useState(false);
   const [search, setSearch] = useState('');
   const [filterInfeed, setFilterInfeed] = useState('');
+  const [filterEntryPoint, setFilterEntryPoint] = useState('');
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 50;
 
-  const infeeds = [...new Set(data.map(r => r.infeed))].sort();
+  const accentRing  = isBad ? 'focus:ring-red-400'   : 'focus:ring-green-400';
+  const copyBtnCls  = isBad
+    ? 'bg-red-50 border-red-200 text-red-700 hover:bg-red-100'
+    : 'bg-green-50 border-green-200 text-green-700 hover:bg-green-100';
+  const hostpicColor = isBad ? 'text-red-700' : 'text-green-700';
+  const badgeCls    = isBad ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800';
+  const title       = isBad ? 'HOSTPICs inducidos incorrectamente' : 'HOSTPICs inducidos correctamente';
+  const subtitle    = isBad ? 'msg21 + lastDest=998' : 'msg20 + lastDest≠998';
+
+  const infeeds = [...new Set(data.map(r => r.infeed))].sort((a, b) => {
+    const numA = parseInt(a.replace('INFEED ', '')) || 999;
+    const numB = parseInt(b.replace('INFEED ', '')) || 999;
+    return numA - numB;
+  });
+
+  const entryPoints = [...new Set(
+    data.filter(r => !filterInfeed || r.infeed === filterInfeed).map(r => r.entry_point)
+  )].sort();
 
   const filtered = data.filter(r => {
     const matchSearch = !search || r.hostpic.toLowerCase().includes(search.toLowerCase());
     const matchInfeed = !filterInfeed || r.infeed === filterInfeed;
-    return matchSearch && matchInfeed;
+    const matchEP = !filterEntryPoint || r.entry_point === filterEntryPoint;
+    return matchSearch && matchInfeed && matchEP;
   });
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   const handleSearch = (val) => { setSearch(val); setPage(1); };
-  const handleInfeed = (val) => { setFilterInfeed(val); setPage(1); };
+  const handleInfeed = (val) => { setFilterInfeed(val); setFilterEntryPoint(''); setPage(1); };
+  const handleEntryPoint = (val) => { setFilterEntryPoint(val); setPage(1); };
 
   const copyAll = () => {
-    const text = filtered.map(r => r.hostpic).join('\n');
-    navigator.clipboard.writeText(text);
+    navigator.clipboard.writeText(filtered.map(r => r.hostpic).join('\n'));
   };
 
   return (
     <div className="bg-white rounded-lg shadow">
+      {/* Header */}
       <div className="px-6 py-4 border-b flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h3 className="text-lg font-semibold text-gray-900">HOSTPICs inducidos incorrectamente</h3>
+          <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
           <p className="text-xs text-gray-500 mt-0.5">
-            msg21 + lastDest=998 — {total.toLocaleString()} únicos en total
+            {subtitle} — {total.toLocaleString()} únicos en total
             {filtered.length !== total && ` (${filtered.length.toLocaleString()} filtrados)`}
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <input
-            type="text"
-            placeholder="Buscar HOSTPIC..."
-            value={search}
-            onChange={e => handleSearch(e.target.value)}
-            className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-red-400 w-48"
-          />
-          <select
-            value={filterInfeed}
-            onChange={e => handleInfeed(e.target.value)}
-            className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-red-400"
-          >
-            <option value="">Todos los infeeds</option>
-            {infeeds.map(inf => <option key={inf} value={inf}>{inf}</option>)}
-          </select>
+          {!collapsed && (
+            <>
+              <input
+                type="text"
+                placeholder="Buscar HOSTPIC..."
+                value={search}
+                onChange={e => handleSearch(e.target.value)}
+                className={`border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 ${accentRing} w-48`}
+              />
+              <select
+                value={filterInfeed}
+                onChange={e => handleInfeed(e.target.value)}
+                className={`border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 ${accentRing}`}
+              >
+                <option value="">Todos los infeeds</option>
+                {infeeds.map(inf => <option key={inf} value={inf}>{inf}</option>)}
+              </select>
+              <select
+                value={filterEntryPoint}
+                onChange={e => handleEntryPoint(e.target.value)}
+                className={`border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 ${accentRing} font-mono`}
+              >
+                <option value="">Todos los entry points</option>
+                {entryPoints.map(ep => <option key={ep} value={ep}>{ep}</option>)}
+              </select>
+              <button
+                onClick={copyAll}
+                className={`px-3 py-1.5 text-sm border rounded font-medium ${copyBtnCls}`}
+                title="Copiar todos los HOSTPICs filtrados al portapapeles"
+              >
+                Copiar lista
+              </button>
+            </>
+          )}
+          {/* Botón minimizar / expandir */}
           <button
-            onClick={copyAll}
-            className="px-3 py-1.5 text-sm bg-red-50 border border-red-200 text-red-700 rounded hover:bg-red-100 font-medium"
-            title="Copiar todos los HOSTPICs filtrados al portapapeles"
+            onClick={() => setCollapsed(c => !c)}
+            className="ml-1 px-2 py-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded border border-gray-200 text-xs font-mono"
+            title={collapsed ? 'Expandir tabla' : 'Minimizar tabla'}
           >
-            Copiar lista
+            {collapsed ? '▼ Expandir' : '▲ Minimizar'}
           </button>
         </div>
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-sm divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">#</th>
-              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">HOSTPIC</th>
-              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">INFEED</th>
-              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Entry Point</th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-100">
-            {paged.map((row, idx) => (
-              <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                <td className="px-4 py-2 text-gray-400 text-xs">{(page - 1) * PAGE_SIZE + idx + 1}</td>
-                <td className="px-4 py-2 font-mono font-semibold text-red-700">{row.hostpic}</td>
-                <td className="px-4 py-2">
-                  <span className="px-2 py-0.5 bg-red-100 text-red-800 rounded-full text-xs font-medium">{row.infeed}</span>
-                </td>
-                <td className="px-4 py-2 font-mono text-gray-500 text-xs">{row.entry_point}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {totalPages > 1 && (
-        <div className="px-6 py-3 border-t flex items-center justify-between text-sm text-gray-600">
-          <span>Página {page} de {totalPages}</span>
-          <div className="flex gap-2">
-            <button
-              disabled={page === 1}
-              onClick={() => setPage(p => p - 1)}
-              className="px-3 py-1 border rounded disabled:opacity-40 hover:bg-gray-50"
-            >Anterior</button>
-            <button
-              disabled={page === totalPages}
-              onClick={() => setPage(p => p + 1)}
-              className="px-3 py-1 border rounded disabled:opacity-40 hover:bg-gray-50"
-            >Siguiente</button>
+      {!collapsed && (
+        <>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">#</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">HOSTPIC</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">INFEED</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Entry Point</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-100">
+                {paged.map((row, idx) => (
+                  <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                    <td className="px-4 py-2 text-gray-400 text-xs">{(page - 1) * PAGE_SIZE + idx + 1}</td>
+                    <td className={`px-4 py-2 font-mono font-semibold ${hostpicColor}`}>{row.hostpic}</td>
+                    <td className="px-4 py-2">
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${badgeCls}`}>{row.infeed}</span>
+                    </td>
+                    <td className="px-4 py-2 font-mono text-gray-500 text-xs">{row.entry_point}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        </div>
+
+          {totalPages > 1 && (
+            <div className="px-6 py-3 border-t flex items-center justify-between text-sm text-gray-600">
+              <span>Página {page} de {totalPages}</span>
+              <div className="flex gap-2">
+                <button disabled={page === 1} onClick={() => setPage(p => p - 1)}
+                  className="px-3 py-1 border rounded disabled:opacity-40 hover:bg-gray-50">Anterior</button>
+                <button disabled={page === totalPages} onClick={() => setPage(p => p + 1)}
+                  className="px-3 py-1 border rounded disabled:opacity-40 hover:bg-gray-50">Siguiente</button>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
