@@ -1026,74 +1026,68 @@ async def get_induction_quality(database_id: str):
 
         # Paquetes mal inducidos: mensaje 21 con lastdestination = '998'
         bad_rows = await conn.fetch(f"""
-            SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col}
+            SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col},
+                EXTRACT(HOUR FROM timestamp)::int AS hour
             FROM {safe_table}
             WHERE message_id = 21
             AND TRIM({lastdest_col}) = '998'
             AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
             AND TRIM({entrypoint_col}) NOT IN ('-', '')
-            ORDER BY {hostpic_col}, {entrypoint_col}
+            ORDER BY {hostpic_col}, timestamp
         """)
 
         # Paquetes bien inducidos: mensaje 20, lastdestination != '998', original_destination_state = 1
         origdest_filter = f"AND TRIM({origdeststate_col}::text) = '1'" if origdeststate_col else ""
         good_rows = await conn.fetch(f"""
-            SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col}
+            SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col},
+                EXTRACT(HOUR FROM timestamp)::int AS hour
             FROM {safe_table}
             WHERE message_id = 20
             AND TRIM({lastdest_col}) != '998'
             {origdest_filter}
             AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
             AND TRIM({entrypoint_col}) NOT IN ('-', '')
-            ORDER BY {hostpic_col}, {entrypoint_col}
+            ORDER BY {hostpic_col}, timestamp
         """)
 
-        infeed_stats = {i: {'good': 0, 'bad': 0} for i in range(1, 11)}
-        loop_stats = {'good': 0, 'bad': 0}
+        # Agrupar por (hora, infeed_num) — el frontend filtra por hora sin llamadas extra al backend
+        hour_infeed_stats: Dict[tuple, Dict] = {}
 
         for row in good_rows:
             infeed = get_infeed_number(str(row[entrypoint_col] or ''))
-            if infeed:
-                infeed_stats[infeed]['good'] += 1
-            else:
-                loop_stats['good'] += 1
+            infeed_num = infeed if infeed else 99
+            hour = int(row['hour']) if row['hour'] is not None else 0
+            key = (hour, infeed_num)
+            if key not in hour_infeed_stats:
+                hour_infeed_stats[key] = {'good': 0, 'bad': 0}
+            hour_infeed_stats[key]['good'] += 1
 
         for row in bad_rows:
             infeed = get_infeed_number(str(row[entrypoint_col] or ''))
-            if infeed:
-                infeed_stats[infeed]['bad'] += 1
-            else:
-                loop_stats['bad'] += 1
+            infeed_num = infeed if infeed else 99
+            hour = int(row['hour']) if row['hour'] is not None else 0
+            key = (hour, infeed_num)
+            if key not in hour_infeed_stats:
+                hour_infeed_stats[key] = {'good': 0, 'bad': 0}
+            hour_infeed_stats[key]['bad'] += 1
 
         result = []
-        for i in range(1, 11):
-            good = infeed_stats[i]['good']
-            bad = infeed_stats[i]['bad']
+        for (hour, infeed_num), stats in sorted(hour_infeed_stats.items()):
+            good = stats['good']
+            bad = stats['bad']
             total = good + bad
             if total > 0:
+                infeed_name = f'INFEED {infeed_num}' if infeed_num != 99 else 'Loop del Crossorter'
                 result.append({
-                    'infeed': f'INFEED {i}',
-                    'infeed_num': i,
+                    'infeed': infeed_name,
+                    'infeed_num': infeed_num,
                     'good': good,
                     'bad': bad,
                     'total': total,
                     'good_pct': round((good / total) * 100, 1),
-                    'bad_pct': round((bad / total) * 100, 1)
+                    'bad_pct': round((bad / total) * 100, 1),
+                    'hour': hour,
                 })
-
-        loop_good = loop_stats['good']
-        loop_bad = loop_stats['bad']
-        loop_total = loop_good + loop_bad
-        if loop_total > 0:
-            result.append({
-                'infeed': 'Loop del Crossorter',
-                'infeed_num': 99,
-                'good': loop_good,
-                'bad': loop_bad,
-                'total': loop_total,
-                'good_pct': round((loop_good / loop_total) * 100, 1),
-                'bad_pct': round((loop_bad / loop_total) * 100, 1)
-            })
 
         return {
             'data': result,

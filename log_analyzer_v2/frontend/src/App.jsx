@@ -773,8 +773,44 @@ function ViewLogsTab({
   );
 }
 
+function aggregateByInfeed(rows) {
+  const map = {};
+  for (const r of rows) {
+    if (!map[r.infeed]) {
+      map[r.infeed] = { infeed: r.infeed, infeed_num: r.infeed_num, good: 0, bad: 0, total: 0 };
+    }
+    map[r.infeed].good += r.good;
+    map[r.infeed].bad  += r.bad;
+    map[r.infeed].total += r.total;
+  }
+  return Object.values(map)
+    .map(d => ({
+      ...d,
+      good_pct: d.total > 0 ? Math.round((d.good / d.total) * 1000) / 10 : 0,
+      bad_pct:  d.total > 0 ? Math.round((d.bad  / d.total) * 1000) / 10 : 0,
+    }))
+    .sort((a, b) => a.infeed_num - b.infeed_num);
+}
+
 // Componente de Gráficos y Análisis
 function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, inductionQuality, badHostpics, goodHostpics }) {
+  const [filterChartHour, setFilterChartHour] = useState('');
+
+  const hours = useMemo(() => {
+    if (!inductionQuality?.data?.length) return [];
+    return [...new Set(inductionQuality.data.map(r => r.hour))].sort((a, b) => a - b);
+  }, [inductionQuality]);
+
+  const chartData = useMemo(() => {
+    if (!inductionQuality?.data?.length) return [];
+    const rows = filterChartHour === ''
+      ? inductionQuality.data
+      : inductionQuality.data.filter(r => r.hour === filterChartHour);
+    return aggregateByInfeed(rows);
+  }, [inductionQuality, filterChartHour]);
+
+  useEffect(() => { setFilterChartHour(''); }, [selectedDatabase?.id]);
+
   if (!selectedDatabase) {
     return (
       <div className="text-center py-12">
@@ -828,7 +864,21 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
       {/* Calidad de Inducción por Infeed */}
       {inductionQuality !== null && (
         <div className="bg-white p-6 rounded-lg shadow">
-          <h3 className="text-lg font-medium text-gray-900 mb-1">Calidad de Inducción por Infeed</h3>
+          <div className="flex items-center justify-between mb-1 flex-wrap gap-3">
+            <h3 className="text-lg font-medium text-gray-900">Calidad de Inducción por Infeed</h3>
+            {hours.length > 0 && (
+              <select
+                value={filterChartHour}
+                onChange={e => setFilterChartHour(e.target.value === '' ? '' : parseInt(e.target.value))}
+                className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+              >
+                <option value="">Todas las horas</option>
+                {hours.map(h => (
+                  <option key={h} value={h}>{String(h).padStart(2,'0')}:00 – {String(h).padStart(2,'0')}:59</option>
+                ))}
+              </select>
+            )}
+          </div>
           <p className="text-sm text-gray-500 mb-4">
             Correctos: msg20 con lastDest≠998 &nbsp;|&nbsp; Incorrectos: msg21 con lastDest=998
           </p>
@@ -836,8 +886,8 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
           {inductionQuality.data && inductionQuality.data.length > 0 ? (
             <>
               {(() => {
-                const totalGood = inductionQuality.data.reduce((s, d) => s + d.good, 0);
-                const totalBad  = inductionQuality.data.reduce((s, d) => s + d.bad,  0);
+                const totalGood = chartData.reduce((s, d) => s + d.good, 0);
+                const totalBad  = chartData.reduce((s, d) => s + d.bad,  0);
                 const totalAll  = totalGood + totalBad;
                 const globalPct = totalAll > 0 ? ((totalGood / totalAll) * 100).toFixed(1) : null;
                 return (
@@ -861,7 +911,7 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
               })()}
 
               <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={inductionQuality.data} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
+                <BarChart data={chartData} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="infeed" tick={{ fontSize: 11 }} tickFormatter={(v) => v === 'Loop del Crossorter' ? 'Loop' : v} />
                   <YAxis tick={{ fontSize: 12 }} />
@@ -900,7 +950,7 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-100">
-                    {inductionQuality.data.map((row, idx) => (
+                    {chartData.map((row, idx) => (
                       <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                         <td className="px-4 py-2 font-medium text-gray-900">{row.infeed}</td>
                         <td className="px-4 py-2 text-right text-green-600 font-medium">{row.good.toLocaleString()}</td>
