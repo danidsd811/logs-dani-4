@@ -85,30 +85,14 @@ function LogAnalyzerApp() {
     setInductionQuality(null);
     setBadHostpics(null);
     setGoodHostpics(null);
-    try {
-      const response = await fetch(`${API_BASE}/databases/${databaseId}/induction_quality`);
-      const data = await response.json();
-      setInductionQuality(data);
-    } catch (error) {
-      console.error('Error fetching induction quality:', error);
-      setInductionQuality({ data: [] });
-    }
-    try {
-      const response = await fetch(`${API_BASE}/databases/${databaseId}/bad_hostpics`);
-      const data = await response.json();
-      setBadHostpics(data);
-    } catch (error) {
-      console.error('Error fetching bad hostpics:', error);
-      setBadHostpics({ data: [], total: 0 });
-    }
-    try {
-      const response = await fetch(`${API_BASE}/databases/${databaseId}/good_hostpics`);
-      const data = await response.json();
-      setGoodHostpics(data);
-    } catch (error) {
-      console.error('Error fetching good hostpics:', error);
-      setGoodHostpics({ data: [], total: 0 });
-    }
+    const [iq, bad, good] = await Promise.allSettled([
+      fetch(`${API_BASE}/databases/${databaseId}/induction_quality`).then(r => r.json()),
+      fetch(`${API_BASE}/databases/${databaseId}/bad_hostpics`).then(r => r.json()),
+      fetch(`${API_BASE}/databases/${databaseId}/good_hostpics`).then(r => r.json()),
+    ]);
+    setInductionQuality(iq.status === 'fulfilled' ? iq.value : { data: [] });
+    setBadHostpics(bad.status === 'fulfilled' ? bad.value : { data: [], total: 0 });
+    setGoodHostpics(good.status === 'fulfilled' ? good.value : { data: [], total: 0 });
   };
 
   // Efecto para cargar logs y estadísticas cuando cambia la base de datos
@@ -996,25 +980,30 @@ function HostpicsTable({ data, total, variant }) {
   const title       = isBad ? 'HOSTPICs inducidos incorrectamente' : 'HOSTPICs inducidos correctamente';
   const subtitle    = isBad ? 'msg21 + lastDest=998' : 'msg20 + lastDest≠998';
 
-  const infeeds = [...new Set(data.map(r => r.infeed))].sort((a, b) => {
-    const numA = parseInt(a.replace('INFEED ', '')) || 999;
-    const numB = parseInt(b.replace('INFEED ', '')) || 999;
-    return numA - numB;
-  });
+  const infeeds = useMemo(() =>
+    [...new Set(data.map(r => r.infeed))].sort((a, b) => {
+      const numA = parseInt(a.replace('INFEED ', '')) || 999;
+      const numB = parseInt(b.replace('INFEED ', '')) || 999;
+      return numA - numB;
+    }), [data]);
 
-  const entryPoints = [...new Set(
-    data.filter(r => !filterInfeed || r.infeed === filterInfeed).map(r => r.entry_point)
-  )].sort();
+  const entryPoints = useMemo(() =>
+    [...new Set(
+      data.filter(r => !filterInfeed || r.infeed === filterInfeed).map(r => r.entry_point)
+    )].sort(), [data, filterInfeed]);
 
-  const filtered = data.filter(r => {
-    const matchSearch = !search || r.hostpic.toLowerCase().includes(search.toLowerCase());
-    const matchInfeed = !filterInfeed || r.infeed === filterInfeed;
-    const matchEP = !filterEntryPoint || r.entry_point === filterEntryPoint;
-    return matchSearch && matchInfeed && matchEP;
-  });
+  const filtered = useMemo(() =>
+    data.filter(r => {
+      const matchSearch = !search || r.hostpic.toLowerCase().includes(search.toLowerCase());
+      const matchInfeed = !filterInfeed || r.infeed === filterInfeed;
+      const matchEP = !filterEntryPoint || r.entry_point === filterEntryPoint;
+      return matchSearch && matchInfeed && matchEP;
+    }), [data, search, filterInfeed, filterEntryPoint]);
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
-  const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const paged = useMemo(() =>
+    filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [filtered, page]);
 
   const handleSearch = (val) => { setSearch(val); setPage(1); };
   const handleInfeed = (val) => { setFilterInfeed(val); setFilterEntryPoint(''); setPage(1); };

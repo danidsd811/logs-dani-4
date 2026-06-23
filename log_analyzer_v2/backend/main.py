@@ -31,6 +31,10 @@ INFEED_MAPPING = {
     9: {'25', '26', '27'},
     10: {'28', '29', '30'},
 }
+# Tabla invertida para lookup O(1): '05' -> 1, '61' -> 6, etc.
+INFEED_REVERSE: Dict[str, int] = {
+    code: infeed_num for infeed_num, codes in INFEED_MAPPING.items() for code in codes
+}
 
 app = FastAPI(title="Log Analyzer - Ultra Optimized", version="4.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -39,15 +43,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://loguser:logpass@postgres:
 db_pool = None
 
 def get_infeed_number(entry_point: str) -> Optional[int]:
-    """Determina el número de infeed a partir del parcel entry point (ej: 0050.61.04.PEC31 → 8)"""
+    """Determina el número de infeed a partir del parcel entry point (ej: 0050.61.04.PEC31 → 6)"""
     if not entry_point or entry_point.strip() in ('-', ''):
         return None
     match = re.search(r'0*50\.(\d{2})\.', entry_point.strip())
     if match:
-        xx = match.group(1)
-        for infeed_num, codes in INFEED_MAPPING.items():
-            if xx in codes:
-                return infeed_num
+        return INFEED_REVERSE.get(match.group(1))
     return None
 
 # Regex compilados para timestamp parsing ultra-rápido
@@ -55,6 +56,9 @@ TIMESTAMP_PATTERNS = [
     re.compile(r'^(\d{2})/(\d{2})/(\d{4}) (\d{2}):(\d{2}):(\d{2})\.(\d{3})$'),
     re.compile(r'^(\d{2})/(\d{2})/(\d{4}) (\d{2}):(\d{2}):(\d{2})$')
 ]
+# Regex compilada para limpiar caracteres de control (usada en hot path SCNET)
+_CTRL_CHARS_RE = re.compile(r'[\x00-\x1F]')
+_NON_DIGITS_RE = re.compile(r'[^0-9]')
 
 # *** NUEVA FUNCIÓN: Sistema de rotación automática ***
 async def cleanup_old_tables():
@@ -478,89 +482,44 @@ class SCNETSchemaOptimized:
         """Parse línea FSC con limpieza robusta de caracteres de control"""
         if not line.strip():
             return None
-    
-        # PASO 1: Limpiar caracteres de control y @ al final
-        line = line.rstrip('@').strip()
-        
-        # Remover caracteres de control comunes (0x00 a 0x1F)
-        import re
-        line = re.sub(r'[\x00-\x1F]', '', line)
-        
+
+        line = _CTRL_CHARS_RE.sub('', line.rstrip('@').strip())
         if not line:
             return None
-    
+
         parts = line.split('|')
         if len(parts) < 3:
             return None
-    
+
         try:
-            # Parse básico
-            timestamp_str = parts[0].strip()
-            message_id_str = parts[1].strip()
-            
-            # PASO 2: Limpiar message_id de caracteres no numéricos residuales
-            message_id_clean = re.sub(r'[^0-9]', '', message_id_str)
-            
+            message_id_clean = _NON_DIGITS_RE.sub('', parts[1])
             if not message_id_clean:
                 return None
-        
-            timestamp = self.parse_timestamp_fast(timestamp_str)
+
+            timestamp = self.parse_timestamp_fast(parts[0].strip())
             if not timestamp:
                 return None
-            
+
             message_id = int(message_id_clean)
-        
-            # Verificar si existe mapeo para este MessageID
             if message_id not in self.message_id_to_field_positions:
-                # DEBUG TEMPORAL: comentar después de validar
-                # logger.debug(f"MessageID {message_id} not in schema. Available: {list(self.message_id_to_field_positions.keys())[:5]}...")
                 return None
-        
-            # Inicializar record
+
             record = ["-"] * self.column_count
             record[0] = timestamp
             record[1] = message_id
-        
-            # Mapear campos
+
             field_positions = self.message_id_to_field_positions[message_id]
             mapped_count = 0
-            
-            # DEBUG TEMPORAL: para las primeras 10 líneas de cada MessageID
-            is_debug = hasattr(self, '_debug_count')
-            if not is_debug:
-                self._debug_count = {}
-            
-            if message_id not in self._debug_count:
-                self._debug_count[message_id] = 0
-            
-            debug_this_line = self._debug_count[message_id] < 3
-            if debug_this_line:
-                self._debug_count[message_id] += 1
-                logger.info(f"DEBUG MessageID {message_id}: Line has {len(parts)} parts, expects {len(field_positions)} fields")
-            
             for prop_name, log_position in field_positions.items():
-                if prop_name in self.property_to_table_index:
-                    if log_position < len(parts):
-                        value = parts[log_position].strip()
-                        if value:  # Solo mapear valores no vacíos
-                            table_index = self.property_to_table_index[prop_name]
-                            record[table_index] = value
-                            mapped_count += 1
-                            
-                            if debug_this_line:
-                                logger.info(f"  Mapped {prop_name} (pos {log_position}): '{value[:20]}...' -> col {table_index}")
-                    elif debug_this_line:
-                        logger.warning(f"  Missing {prop_name} at position {log_position} (line has {len(parts)} parts)")
-        
-            if debug_this_line:
-                logger.info(f"  Result: {mapped_count}/{len(field_positions)} fields mapped for MessageID {message_id}")
-            
-            # Solo retornar si se mapeó al menos algo
+                if prop_name in self.property_to_table_index and log_position < len(parts):
+                    value = parts[log_position].strip()
+                    if value:
+                        record[self.property_to_table_index[prop_name]] = value
+                        mapped_count += 1
+
             return record if mapped_count > 0 else None
-        
-        except (ValueError, IndexError) as e:
-            # DEBUG TEMPORAL
-            logger.debug(f"Parse error: {str(e)} - Line: {line[:100]}...")
+
+        except (ValueError, IndexError):
             return None
     
     def get_create_table_sql(self, table_name: str) -> str:
@@ -645,10 +604,10 @@ async def process_ultra_fast(log_path: str, config: Dict, database_id: str, file
     lines_read = 0
     last_log = start_time
     
-    with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+    with open(log_path, 'r', encoding='utf-8', errors='ignore', buffering=8*1024*1024) as f:
         for line in f:
             lines_read += 1
-            
+
             # Limpiar caracteres problemáticos ANTES del parsing
             line = line.replace('\x00', '').replace('\r', '').strip()
             
@@ -699,9 +658,10 @@ async def process_ultra_fast(log_path: str, config: Dict, database_id: str, file
     
     # *** LIMPIEZA DESPUÉS de guardar - ahora que tenemos la nueva tabla ***
     await cleanup_old_tables()
-    
+    await create_analytics_indexes(pool, table_name, column_names)
+
     logger.info(f"ULTRA-FAST COMPLETE: {total_processed:,} records in {processing_time:.2f}s ({speed:,.0f} rec/sec)")
-    
+
     return total_processed, processing_time, table_name
 
 async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: str, filename: str) -> Tuple[int, float, str]:
@@ -736,10 +696,10 @@ async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: st
     lines_skipped = 0
     last_log = start_time
     
-    with open(fsc_path, 'r', encoding='utf-8', errors='ignore') as f:
+    with open(fsc_path, 'r', encoding='utf-8', errors='ignore', buffering=8*1024*1024) as f:
         for line in f:
             lines_read += 1
-            
+
             # Limpieza robusta de caracteres problemáticos
             line = line.replace('\x00', '').replace('\r', '').strip()
             
@@ -796,9 +756,10 @@ async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: st
     
     # *** LIMPIEZA DESPUÉS de guardar - ahora que tenemos la nueva tabla ***
     await cleanup_old_tables()
-    
+    await create_analytics_indexes(pool, table_name, column_names)
+
     logger.info(f"SCNET COMPLETE: {total_processed:,} records in {processing_time:.2f}s ({speed:,.0f} rec/sec)")
-    
+
     return total_processed, processing_time, table_name
 
 async def insert_ultra_fast(pool, table_name: str, batch: List[tuple], columns: List[tuple]) -> int:
@@ -824,6 +785,29 @@ async def insert_ultra_fast(pool, table_name: str, batch: List[tuple], columns: 
             except Exception as e2:
                 logger.error(f"Executemany failed: {e2}")
                 return 0
+
+async def create_analytics_indexes(pool, table_name: str, column_names: List[str]):
+    """Índice compuesto para acelerar DISTINCT ON (hostpic) en queries de Analytics"""
+    safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+    hostpic_col   = next((c for c in column_names if c.lower() == 'hostpic'), None)
+    lastdest_col  = next((c for c in column_names if 'lastdestination' in c.lower() or c.lower() in ('last_destination', 'lastdestination')), None)
+    entrypoint_col = next((c for c in column_names if c.lower() in ('parcel_entry_point', 'parcelentrypoint', 'entrance_point', 'entrypoint', 'entry_point') or 'parcelentrypoint' in c.lower()), None)
+
+    if not all([hostpic_col, lastdest_col, entrypoint_col]):
+        logger.info(f"Analytics columns not detected for {table_name} — skipping composite index")
+        return
+
+    idx_name = f"idx_{safe_table[:40]}_analytics"
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(f"""
+                CREATE INDEX IF NOT EXISTS {idx_name}
+                ON {safe_table}(message_id, {lastdest_col}, {hostpic_col}, {entrypoint_col})
+            """)
+            logger.info(f"Analytics index created: {idx_name}")
+        except Exception as e:
+            logger.warning(f"Could not create analytics index for {table_name}: {e}")
+
 
 # API Routes
 @app.on_event("startup")
