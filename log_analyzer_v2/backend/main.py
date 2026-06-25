@@ -19,37 +19,91 @@ logger = logging.getLogger(__name__)
 # *** NUEVO: Constante para rotación de tablas ***
 MAX_TABLES = 10
 
-INFEED_MAPPING = {
-    1: {'05', '06', '07', '08', '09'},
-    2: {'10', '11', '12', '13', '14'},
-    3: {'15', '16', '17', '18', '19'},
-    4: {'20', '21', '22', '23', '24'},
-    5: {'55', '56', '57', '58', '59'},
-    6: {'60', '61', '63', '64'},
-    7: {'65', '66', '67', '68', '69'},
-    8: {'70', '71', '72', '73', '74'},
-    9: {'25', '26', '27'},
-    10: {'28', '29', '30'},
-}
-# Tabla invertida para lookup O(1): '05' -> 1, '61' -> 6, etc.
-INFEED_REVERSE: Dict[str, int] = {
-    code: infeed_num for infeed_num, codes in INFEED_MAPPING.items() for code in codes
-}
+# ─── Customer configs ──────────────────────────────────────────────────────────
+CUSTOMER_CONFIGS: Dict[str, Dict] = {}
+
+def load_customer_configs():
+    """Carga todos los JSON de clientes desde configs/"""
+    configs_dir = os.path.join(os.path.dirname(__file__), 'configs')
+    if not os.path.exists(configs_dir):
+        logger.warning(f"configs/ directory not found at {configs_dir}")
+        return
+    for fname in sorted(os.listdir(configs_dir)):
+        if not fname.endswith('.json'):
+            continue
+        path = os.path.join(configs_dir, fname)
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+            # Tabla inversa código → zona para lookup O(1)
+            cfg['_zone_reverse'] = {
+                code: zone
+                for zone in cfg.get('zones', [])
+                for code in zone.get('codes', [])
+            }
+            CUSTOMER_CONFIGS[cfg['id']] = cfg
+            logger.info(f"Loaded customer config: {cfg['name']} ({fname})")
+        except Exception as e:
+            logger.error(f"Failed to load config {fname}: {e}")
+
+def get_customer_config(customer_id: Optional[str]) -> Optional[Dict]:
+    """Devuelve el config del cliente, con fallback al primero disponible"""
+    if customer_id and customer_id in CUSTOMER_CONFIGS:
+        return CUSTOMER_CONFIGS[customer_id]
+    if CUSTOMER_CONFIGS:
+        return next(iter(CUSTOMER_CONFIGS.values()))
+    return None
+
+def find_column(columns: List[str], *patterns: str) -> Optional[str]:
+    """Busca en columns cualquier nombre que coincida con los patrones (ignora mayúsculas y guiones bajos)"""
+    needles = {p.lower().replace('_', '') for p in patterns}
+    return next((c for c in columns if c.lower().replace('_', '') in needles), None)
+
+def get_zone_for_entry_point(entry_point: str, config: Dict) -> Dict:
+    """Devuelve el dict de zona para el entry point dado, según el config del cliente"""
+    default_id = config.get('default_zone_id', 99)
+    zones = config.get('zones', [])
+    default_zone = next((z for z in zones if z['id'] == default_id), {'id': 99, 'name': 'Unknown'})
+
+    if not entry_point or entry_point.strip() in ('-', ''):
+        return default_zone
+
+    ep_cfg = config.get('entry_point', {})
+    pattern = ep_cfg.get('pattern')
+    group = ep_cfg.get('group', 1)
+    if not pattern:
+        return default_zone
+
+    match = re.search(pattern, entry_point.strip())
+    if match:
+        zone = config.get('_zone_reverse', {}).get(match.group(group))
+        if zone:
+            return zone
+
+    return default_zone
+
+def build_condition_sql(conditions: List[Dict], columns: List[str]) -> str:
+    """Genera cláusula SQL AND a partir de las condiciones del config de cliente"""
+    parts = []
+    for cond in conditions:
+        col = find_column(columns, cond['column'])
+        if col is None:
+            if cond.get('optional', False):
+                continue
+            logger.warning(f"Condition column '{cond['column']}' not found in table columns")
+            continue
+        op = cond['op']
+        val = cond['value'].replace("'", "''")
+        parts.append(f"TRIM({col}::text) {op} '{val}'")
+    return ' AND '.join(parts) if parts else '1=1'
+
+# ───────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Log Analyzer - Ultra Optimized", version="4.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://loguser:logpass@postgres:5432/logs_analyzer")
 db_pool = None
-
-def get_infeed_number(entry_point: str) -> Optional[int]:
-    """Determina el número de infeed a partir del parcel entry point (ej: 0050.61.04.PEC31 → 6)"""
-    if not entry_point or entry_point.strip() in ('-', ''):
-        return None
-    match = re.search(r'0*50\.(\d{2})\.', entry_point.strip())
-    if match:
-        return INFEED_REVERSE.get(match.group(1))
-    return None
 
 # Regex compilados para timestamp parsing ultra-rápido
 TIMESTAMP_PATTERNS = [
@@ -135,6 +189,8 @@ class DatabaseInfo(BaseModel):
     created_at: datetime
     record_count: int
     file_size_mb: float
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = None
 
 class UltraSchema:
     """Esquema ultra-optimizado con mapeo por MessageField (CORREGIDO)"""
@@ -554,8 +610,13 @@ async def init_database():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 record_count INTEGER DEFAULT 0,
                 file_size_mb FLOAT DEFAULT 0,
-                columns_info JSONB
+                columns_info JSONB,
+                customer_id VARCHAR(100)
             )
+        """)
+        # Migración: añadir columna si la BD ya existía
+        await conn.execute("""
+            ALTER TABLE databases ADD COLUMN IF NOT EXISTS customer_id VARCHAR(100)
         """)
 
 async def get_unique_table_name(base_name: str) -> str:
@@ -577,7 +638,7 @@ def extract_table_number(filename: str) -> str:
     match = re.search(r'(\d+)', filename)
     return match.group(1) if match else str(int(time.time()))
 
-async def process_ultra_fast(log_path: str, config: Dict, database_id: str, filename: str) -> Tuple[int, float, str]:
+async def process_ultra_fast(log_path: str, config: Dict, database_id: str, filename: str, customer_id: Optional[str] = None) -> Tuple[int, float, str]:
     """Procesamiento ultra-optimizado en una sola pasada"""
     start_time = time.time()
     
@@ -652,10 +713,10 @@ async def process_ultra_fast(log_path: str, config: Dict, database_id: str, file
         
         # Ahora insertar los metadatos
         await conn.execute("""
-            INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info)
-            VALUES ($1, $1, $2, $3, $4, $5)
-        """, database_id, table_name, total_processed, file_size_mb, json.dumps(column_names))
-    
+            INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info, customer_id)
+            VALUES ($1, $1, $2, $3, $4, $5, $6)
+        """, database_id, table_name, total_processed, file_size_mb, json.dumps(column_names), customer_id)
+
     # *** LIMPIEZA DESPUÉS de guardar - ahora que tenemos la nueva tabla ***
     await cleanup_old_tables()
     await create_analytics_indexes(pool, table_name, column_names)
@@ -664,7 +725,7 @@ async def process_ultra_fast(log_path: str, config: Dict, database_id: str, file
 
     return total_processed, processing_time, table_name
 
-async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: str, filename: str) -> Tuple[int, float, str]:
+async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: str, filename: str, customer_id: Optional[str] = None) -> Tuple[int, float, str]:
     """Procesamiento SCNET con debug temporal"""
     start_time = time.time()
     
@@ -750,10 +811,10 @@ async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: st
         
         # Ahora insertar los metadatos
         await conn.execute("""
-            INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info)
-            VALUES ($1, $1, $2, $3, $4, $5)
-        """, database_id, table_name, total_processed, file_size_mb, json.dumps(column_names))
-    
+            INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info, customer_id)
+            VALUES ($1, $1, $2, $3, $4, $5, $6)
+        """, database_id, table_name, total_processed, file_size_mb, json.dumps(column_names), customer_id)
+
     # *** LIMPIEZA DESPUÉS de guardar - ahora que tenemos la nueva tabla ***
     await cleanup_old_tables()
     await create_analytics_indexes(pool, table_name, column_names)
@@ -812,6 +873,7 @@ async def create_analytics_indexes(pool, table_name: str, column_names: List[str
 # API Routes
 @app.on_event("startup")
 async def startup():
+    load_customer_configs()
     await init_database()
     logger.info("Ultra-Optimized Log Analyzer started")
 
@@ -819,11 +881,19 @@ async def startup():
 async def root():
     return {"message": "Ultra-Optimized Log Analyzer", "version": "4.0.0"}
 
+@app.get("/customers")
+async def list_customers():
+    return [
+        {"id": cfg["id"], "name": cfg["name"], "charts": cfg.get("charts", [])}
+        for cfg in CUSTOMER_CONFIGS.values()
+    ]
+
 @app.post("/upload", response_model=ProcessResponse)
 async def upload_files(
-    log_file: UploadFile = File(...), 
-    config_file: UploadFile = File(...), 
-    server_type: str = Query("eDS")
+    log_file: UploadFile = File(...),
+    config_file: UploadFile = File(...),
+    server_type: str = Query("eDS"),
+    customer_id: Optional[str] = Query(None)
 ):
     start_time = time.time()
     
@@ -867,17 +937,17 @@ async def upload_files(
             
             # Procesar con eDS
             records_processed, processing_time, table_name = await process_ultra_fast(
-                log_path, config, database_id, log_file.filename
+                log_path, config, database_id, log_file.filename, customer_id
             )
-            
+
             message = f"eDS: {records_processed:,} records processed -> {table_name}"
-            
+
         elif server_type.lower() == "scnet":
             logger.info(f"Processing SCNET files: {log_file.filename} + {config_file.filename}")
-            
+
             # Procesar con SCNET (XML + FSC)
             records_processed, processing_time, table_name = await process_scnet_ultra_fast(
-                log_path, config_path, database_id, log_file.filename
+                log_path, config_path, database_id, log_file.filename, customer_id
             )
             
             message = f"SCNET: {records_processed:,} records processed -> {table_name}"
@@ -916,10 +986,17 @@ async def list_databases():
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT id, name, table_name, created_at, record_count, file_size_mb
+            SELECT id, name, table_name, created_at, record_count, file_size_mb, customer_id
             FROM databases ORDER BY created_at DESC LIMIT 20
         """)
-        return [DatabaseInfo(**dict(row)) for row in rows]
+        result = []
+        for row in rows:
+            d = dict(row)
+            cid = d.get("customer_id")
+            cfg = CUSTOMER_CONFIGS.get(cid) if cid else None
+            d["customer_name"] = cfg["name"] if cfg else None
+            result.append(DatabaseInfo(**d))
+        return result
 
 @app.post("/logs/{database_id}", response_model=LogResponse)
 async def query_logs(database_id: str, query: LogQuery):
@@ -998,7 +1075,7 @@ async def get_induction_quality(database_id: str):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         db_info = await conn.fetchrow(
-            "SELECT table_name, columns_info FROM databases WHERE id = $1",
+            "SELECT table_name, columns_info, customer_id FROM databases WHERE id = $1",
             database_id
         )
         if not db_info:
@@ -1007,95 +1084,83 @@ async def get_induction_quality(database_id: str):
         table_name = db_info['table_name']
         columns = json.loads(db_info['columns_info'] or '[]')
         safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+        cfg = get_customer_config(db_info['customer_id'])
+        if not cfg:
+            return {"data": [], "error": "No customer config available"}
 
-        # Buscar columnas requeridas (tolerante a variaciones de nombre)
-        hostpic_col = next((c for c in columns if c.lower() == 'hostpic'), None)
-        lastdest_col = next((c for c in columns if 'lastdestination' in c.lower() or c.lower() in ('last_destination', 'lastdestination')), None)
-        entrypoint_col = next((c for c in columns if c.lower() in ('parcel_entry_point', 'parcelentrypoint', 'entrance_point', 'entrypoint', 'entry_point') or 'parcelentrypoint' in c.lower()), None)
-        origdeststate_col = next((c for c in columns if c.lower() in ('original_destination_state', 'originaldestinationstate')), None)
+        hostpic_col    = find_column(columns, cfg.get('hostpic_column', 'hostpic'))
+        ep_cfg         = cfg.get('entry_point', {})
+        ep_aliases     = ep_cfg.get('column_aliases', [])
+        entrypoint_col = find_column(columns, ep_cfg.get('column', 'parcelentrypoint'), *ep_aliases)
+        bad_cfg        = cfg.get('bad_package', {})
+        good_cfg       = cfg.get('good_package', {})
 
-        if not all([hostpic_col, lastdest_col, entrypoint_col]):
-            return {
-                "data": [],
-                "columns_found": {
-                    "hostpic": hostpic_col,
-                    "last_destination": lastdest_col,
-                    "parcel_entry_point": entrypoint_col
-                }
-            }
+        if not hostpic_col or not entrypoint_col:
+            return {"data": [], "columns_found": {"hostpic": hostpic_col, "entry_point": entrypoint_col}}
 
-        # Paquetes mal inducidos: mensaje 21 con lastdestination = '998'
+        bad_msg_id  = bad_cfg.get('message_id', 21)
+        good_msg_id = good_cfg.get('message_id', 20)
+        bad_where   = build_condition_sql(bad_cfg.get('conditions', []), columns)
+        good_where  = build_condition_sql(good_cfg.get('conditions', []), columns)
+
         bad_rows = await conn.fetch(f"""
             SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col},
                 EXTRACT(HOUR FROM timestamp)::int AS hour
             FROM {safe_table}
-            WHERE message_id = 21
-            AND TRIM({lastdest_col}) = '998'
+            WHERE message_id = {bad_msg_id}
+            AND {bad_where}
             AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
             AND TRIM({entrypoint_col}) NOT IN ('-', '')
             ORDER BY {hostpic_col}, timestamp
         """)
 
-        # Paquetes bien inducidos: mensaje 20, lastdestination != '998', original_destination_state = 1
-        origdest_filter = f"AND TRIM({origdeststate_col}::text) = '1'" if origdeststate_col else ""
         good_rows = await conn.fetch(f"""
             SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col},
                 EXTRACT(HOUR FROM timestamp)::int AS hour
             FROM {safe_table}
-            WHERE message_id = 20
-            AND TRIM({lastdest_col}) != '998'
-            {origdest_filter}
+            WHERE message_id = {good_msg_id}
+            AND {good_where}
             AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
             AND TRIM({entrypoint_col}) NOT IN ('-', '')
             ORDER BY {hostpic_col}, timestamp
         """)
 
-        # Agrupar por (hora, infeed_num) — el frontend filtra por hora sin llamadas extra al backend
         hour_infeed_stats: Dict[tuple, Dict] = {}
 
         for row in good_rows:
-            infeed = get_infeed_number(str(row[entrypoint_col] or ''))
-            infeed_num = infeed if infeed else 99
-            hour = int(row['hour']) if row['hour'] is not None else 0
-            key = (hour, infeed_num)
-            if key not in hour_infeed_stats:
-                hour_infeed_stats[key] = {'good': 0, 'bad': 0}
-            hour_infeed_stats[key]['good'] += 1
+            zone = get_zone_for_entry_point(str(row[entrypoint_col] or ''), cfg)
+            key = (int(row['hour']) if row['hour'] is not None else 0, zone['id'])
+            s = hour_infeed_stats.setdefault(key, {'zone': zone, 'good': 0, 'bad': 0})
+            s['good'] += 1
 
         for row in bad_rows:
-            infeed = get_infeed_number(str(row[entrypoint_col] or ''))
-            infeed_num = infeed if infeed else 99
-            hour = int(row['hour']) if row['hour'] is not None else 0
-            key = (hour, infeed_num)
-            if key not in hour_infeed_stats:
-                hour_infeed_stats[key] = {'good': 0, 'bad': 0}
-            hour_infeed_stats[key]['bad'] += 1
+            zone = get_zone_for_entry_point(str(row[entrypoint_col] or ''), cfg)
+            key = (int(row['hour']) if row['hour'] is not None else 0, zone['id'])
+            s = hour_infeed_stats.setdefault(key, {'zone': zone, 'good': 0, 'bad': 0})
+            s['bad'] += 1
 
         result = []
-        for (hour, infeed_num), stats in sorted(hour_infeed_stats.items()):
-            good = stats['good']
-            bad = stats['bad']
+        for (hour, _), stats in sorted(hour_infeed_stats.items()):
+            good  = stats['good']
+            bad   = stats['bad']
             total = good + bad
             if total > 0:
-                infeed_name = f'INFEED {infeed_num}' if infeed_num != 99 else 'Loop del Crossorter'
+                zone = stats['zone']
                 result.append({
-                    'infeed': infeed_name,
-                    'infeed_num': infeed_num,
-                    'good': good,
-                    'bad': bad,
-                    'total': total,
-                    'good_pct': round((good / total) * 100, 1),
-                    'bad_pct': round((bad / total) * 100, 1),
-                    'hour': hour,
+                    'infeed':     zone['name'],
+                    'infeed_num': zone['id'],
+                    'good':       good,
+                    'bad':        bad,
+                    'total':      total,
+                    'good_pct':   round((good / total) * 100, 1),
+                    'bad_pct':    round((bad  / total) * 100, 1),
+                    'hour':       hour,
                 })
 
         return {
             'data': result,
-            'columns_used': {
-                'hostpic': hostpic_col,
-                'last_destination': lastdest_col,
-                'parcel_entry_point': entrypoint_col
-            }
+            'columns_used': {'hostpic': hostpic_col, 'entry_point': entrypoint_col},
+            'customer': cfg['name'],
         }
 
 @app.get("/databases/{database_id}/bad_hostpics")
@@ -1103,7 +1168,7 @@ async def get_bad_hostpics(database_id: str):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         db_info = await conn.fetchrow(
-            "SELECT table_name, columns_info FROM databases WHERE id = $1",
+            "SELECT table_name, columns_info, customer_id FROM databases WHERE id = $1",
             database_id
         )
         if not db_info:
@@ -1112,19 +1177,27 @@ async def get_bad_hostpics(database_id: str):
         table_name = db_info['table_name']
         columns = json.loads(db_info['columns_info'] or '[]')
         safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
-
-        hostpic_col = next((c for c in columns if c.lower() == 'hostpic'), None)
-        lastdest_col = next((c for c in columns if 'lastdestination' in c.lower() or c.lower() in ('last_destination', 'lastdestination')), None)
-        entrypoint_col = next((c for c in columns if c.lower() in ('parcel_entry_point', 'parcelentrypoint', 'entrance_point', 'entrypoint', 'entry_point') or 'parcelentrypoint' in c.lower()), None)
-
-        if not all([hostpic_col, lastdest_col, entrypoint_col]):
+        cfg = get_customer_config(db_info['customer_id'])
+        if not cfg:
             return {"data": [], "total": 0}
+
+        hostpic_col    = find_column(columns, cfg.get('hostpic_column', 'hostpic'))
+        ep_cfg         = cfg.get('entry_point', {})
+        ep_aliases     = ep_cfg.get('column_aliases', [])
+        entrypoint_col = find_column(columns, ep_cfg.get('column', 'parcelentrypoint'), *ep_aliases)
+        bad_cfg        = cfg.get('bad_package', {})
+
+        if not hostpic_col or not entrypoint_col:
+            return {"data": [], "total": 0}
+
+        bad_msg_id = bad_cfg.get('message_id', 21)
+        bad_where  = build_condition_sql(bad_cfg.get('conditions', []), columns)
 
         bad_rows = await conn.fetch(f"""
             SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col}
             FROM {safe_table}
-            WHERE message_id = 21
-            AND TRIM({lastdest_col}) = '998'
+            WHERE message_id = {bad_msg_id}
+            AND {bad_where}
             AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
             AND TRIM({entrypoint_col}) NOT IN ('-', '')
             ORDER BY {hostpic_col}, {entrypoint_col}
@@ -1132,16 +1205,15 @@ async def get_bad_hostpics(database_id: str):
 
         data = []
         for row in bad_rows:
-            ep = str(row[entrypoint_col] or '')
-            infeed = get_infeed_number(ep)
+            ep   = str(row[entrypoint_col] or '')
+            zone = get_zone_for_entry_point(ep, cfg)
             data.append({
-                'hostpic': str(row[hostpic_col] or ''),
+                'hostpic':     str(row[hostpic_col] or ''),
                 'entry_point': ep,
-                'infeed': f'INFEED {infeed}' if infeed else 'Loop del Crossorter'
+                'infeed':      zone['name'],
             })
 
         data.sort(key=lambda x: (x['infeed'], x['hostpic']))
-
         return {"data": data, "total": len(data)}
 
 
@@ -1150,7 +1222,7 @@ async def get_good_hostpics(database_id: str):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         db_info = await conn.fetchrow(
-            "SELECT table_name, columns_info FROM databases WHERE id = $1",
+            "SELECT table_name, columns_info, customer_id FROM databases WHERE id = $1",
             database_id
         )
         if not db_info:
@@ -1159,22 +1231,27 @@ async def get_good_hostpics(database_id: str):
         table_name = db_info['table_name']
         columns = json.loads(db_info['columns_info'] or '[]')
         safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
-
-        hostpic_col = next((c for c in columns if c.lower() == 'hostpic'), None)
-        lastdest_col = next((c for c in columns if 'lastdestination' in c.lower() or c.lower() in ('last_destination', 'lastdestination')), None)
-        entrypoint_col = next((c for c in columns if c.lower() in ('parcel_entry_point', 'parcelentrypoint', 'entrance_point', 'entrypoint', 'entry_point') or 'parcelentrypoint' in c.lower()), None)
-        origdeststate_col = next((c for c in columns if c.lower() in ('original_destination_state', 'originaldestinationstate')), None)
-
-        if not all([hostpic_col, lastdest_col, entrypoint_col]):
+        cfg = get_customer_config(db_info['customer_id'])
+        if not cfg:
             return {"data": [], "total": 0}
 
-        origdest_filter = f"AND TRIM({origdeststate_col}::text) = '1'" if origdeststate_col else ""
+        hostpic_col    = find_column(columns, cfg.get('hostpic_column', 'hostpic'))
+        ep_cfg         = cfg.get('entry_point', {})
+        ep_aliases     = ep_cfg.get('column_aliases', [])
+        entrypoint_col = find_column(columns, ep_cfg.get('column', 'parcelentrypoint'), *ep_aliases)
+        good_cfg       = cfg.get('good_package', {})
+
+        if not hostpic_col or not entrypoint_col:
+            return {"data": [], "total": 0}
+
+        good_msg_id = good_cfg.get('message_id', 20)
+        good_where  = build_condition_sql(good_cfg.get('conditions', []), columns)
+
         good_rows = await conn.fetch(f"""
             SELECT DISTINCT ON ({hostpic_col}) {hostpic_col}, {entrypoint_col}
             FROM {safe_table}
-            WHERE message_id = 20
-            AND TRIM({lastdest_col}) != '998'
-            {origdest_filter}
+            WHERE message_id = {good_msg_id}
+            AND {good_where}
             AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
             AND TRIM({entrypoint_col}) NOT IN ('-', '')
             ORDER BY {hostpic_col}, {entrypoint_col}
@@ -1182,16 +1259,15 @@ async def get_good_hostpics(database_id: str):
 
         data = []
         for row in good_rows:
-            ep = str(row[entrypoint_col] or '')
-            infeed = get_infeed_number(ep)
+            ep   = str(row[entrypoint_col] or '')
+            zone = get_zone_for_entry_point(ep, cfg)
             data.append({
-                'hostpic': str(row[hostpic_col] or ''),
+                'hostpic':     str(row[hostpic_col] or ''),
                 'entry_point': ep,
-                'infeed': f'INFEED {infeed}' if infeed else 'Loop del Crossorter'
+                'infeed':      zone['name'],
             })
 
         data.sort(key=lambda x: (x['infeed'], x['hostpic']))
-
         return {"data": data, "total": len(data)}
 
 

@@ -16,6 +16,7 @@ function LogAnalyzerApp() {
   const [inductionQuality, setInductionQuality] = useState(null);
   const [badHostpics, setBadHostpics] = useState(null);
   const [goodHostpics, setGoodHostpics] = useState(null);
+  const [customers, setCustomers] = useState([]);
 
   // Estados para filtros
   const [searchTerm, setSearchTerm] = useState('');
@@ -24,9 +25,13 @@ function LogAnalyzerApp() {
   const [totalRecords, setTotalRecords] = useState(0);
   const [columns, setColumns] = useState([]);
 
-  // Cargar bases de datos al iniciar
+  // Cargar bases de datos y clientes al iniciar
   useEffect(() => {
     fetchDatabases();
+    fetch(`${API_BASE}/customers`)
+      .then(r => r.json())
+      .then(setCustomers)
+      .catch(() => {});
   }, []);
 
   // CORREGIDO: Función global para refresh desde ViewLogsTab
@@ -190,6 +195,7 @@ function LogAnalyzerApp() {
               fetchDatabases();
             }}
             uploadStatus={uploadStatus}
+            customers={customers}
           />
         )}
 
@@ -228,8 +234,9 @@ function LogAnalyzerApp() {
 }
 
 // Componente de Upload con Temporizador
-function UploadTab({ onUploadSuccess, uploadStatus }) {
+function UploadTab({ onUploadSuccess, uploadStatus, customers }) {
   const [serverType, setServerType] = useState('eDS');
+  const [customerId, setCustomerId] = useState('');
   const [logFile, setLogFile] = useState(null);
   const [configFile, setConfigFile] = useState(null);
   const logInputRef = React.useRef();
@@ -290,7 +297,8 @@ function UploadTab({ onUploadSuccess, uploadStatus }) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
 
-    const response = await fetch(`${API_BASE}/upload?server_type=${serverType}`, {
+    const customerParam = customerId ? `&customer_id=${encodeURIComponent(customerId)}` : '';
+    const response = await fetch(`${API_BASE}/upload?server_type=${serverType}${customerParam}`, {
       method: 'POST',
       body: formData,
       signal: controller.signal
@@ -345,6 +353,23 @@ function UploadTab({ onUploadSuccess, uploadStatus }) {
               </label>
             </div>
           </div>
+
+          {/* Customer Selection */}
+          {customers.length > 0 && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Customer</label>
+              <select
+                value={customerId}
+                onChange={e => setCustomerId(e.target.value)}
+                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 text-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="">— Select customer —</option>
+                {customers.map(c => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* Log File Upload */}
           <div>
@@ -554,7 +579,7 @@ function ViewLogsTab({
               ) : (
                 databases.map(db => (
                   <option key={db.id} value={db.id}>
-                    {db.table_name} ({db.record_count?.toLocaleString() || '0'} records) - {new Date(db.created_at).toLocaleDateString()}
+                    {db.table_name} ({db.record_count?.toLocaleString() || '0'} records) - {new Date(db.created_at).toLocaleDateString()}{db.customer_name ? ` · ${db.customer_name}` : ''}
                   </option>
                 ))
               )}
@@ -865,7 +890,14 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
       {inductionQuality !== null && (
         <div className="bg-white p-6 rounded-lg shadow">
           <div className="flex items-center justify-between mb-1 flex-wrap gap-3">
-            <h3 className="text-lg font-medium text-gray-900">Calidad de Inducción por Infeed</h3>
+            <h3 className="text-lg font-medium text-gray-900">
+              Calidad de Inducción por Infeed
+              {inductionQuality?.customer && (
+                <span className="ml-2 text-sm font-normal text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
+                  {inductionQuality.customer}
+                </span>
+              )}
+            </h3>
             {hours.length > 0 && (
               <select
                 value={filterChartHour}
