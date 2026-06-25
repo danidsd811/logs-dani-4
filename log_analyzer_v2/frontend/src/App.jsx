@@ -872,7 +872,7 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
           >
             {databases.map(db => (
               <option key={db.id} value={db.id}>
-                {db.table_name} ({db.record_count?.toLocaleString() || '0'} records) - {new Date(db.created_at).toLocaleDateString()}
+                {db.table_name} ({db.record_count?.toLocaleString() || '0'} records) - {new Date(db.created_at).toLocaleDateString()}{db.customer_name ? ` · ${db.customer_name}` : ''}
               </option>
             ))}
           </select>

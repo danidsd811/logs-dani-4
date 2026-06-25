@@ -108,8 +108,9 @@ def build_condition_sql(conditions: List[Dict], columns: List[str]) -> str:
         if col is None:
             if cond.get('optional', False):
                 continue
-            logger.warning(f"Condition column '{cond['column']}' not found in table columns")
-            continue
+            # Condición requerida ausente → query no debe devolver filas falsas
+            logger.warning(f"Required condition column '{cond['column']}' not found — query will return no rows")
+            return '1=0'
         op = cond['op']
         val = cond['value'].replace("'", "''")
         parts.append(f"TRIM({col}::text) {op} '{val}'")
