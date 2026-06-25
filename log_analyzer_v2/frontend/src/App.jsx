@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Upload, Search, Database, FileText, X, BarChart3, Activity, ChevronLeft, ChevronRight } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
@@ -17,6 +17,7 @@ function LogAnalyzerApp() {
   const [badHostpics, setBadHostpics] = useState(null);
   const [goodHostpics, setGoodHostpics] = useState(null);
   const [customers, setCustomers] = useState([]);
+  const analyticsAbortRef = useRef(null);
 
   // Estados para filtros
   const [searchTerm, setSearchTerm] = useState('');
@@ -43,12 +44,12 @@ function LogAnalyzerApp() {
     };
   }, []);
 
-  const fetchDatabases = async () => {
+  const fetchDatabases = async (selectNewest = false) => {
     try {
       const response = await fetch(`${API_BASE}/databases`);
       const data = await response.json();
       setDatabases(data);
-      if (data.length > 0 && !selectedDatabase) {
+      if (data.length > 0 && (!selectedDatabase || selectNewest)) {
         setSelectedDatabase(data[0]);
       }
     } catch (error) {
@@ -87,17 +88,27 @@ function LogAnalyzerApp() {
 
   const fetchInductionQuality = async (databaseId) => {
     if (!databaseId) return;
+    if (analyticsAbortRef.current) analyticsAbortRef.current.abort();
+    const controller = new AbortController();
+    analyticsAbortRef.current = controller;
+    const { signal } = controller;
+
     setInductionQuality(null);
     setBadHostpics(null);
     setGoodHostpics(null);
-    const [iq, bad, good] = await Promise.allSettled([
-      fetch(`${API_BASE}/databases/${databaseId}/induction_quality`).then(r => r.json()),
-      fetch(`${API_BASE}/databases/${databaseId}/bad_hostpics`).then(r => r.json()),
-      fetch(`${API_BASE}/databases/${databaseId}/good_hostpics`).then(r => r.json()),
-    ]);
-    setInductionQuality(iq.status === 'fulfilled' ? iq.value : { data: [] });
-    setBadHostpics(bad.status === 'fulfilled' ? bad.value : { data: [], total: 0 });
-    setGoodHostpics(good.status === 'fulfilled' ? good.value : { data: [], total: 0 });
+    try {
+      const [iq, bad, good] = await Promise.allSettled([
+        fetch(`${API_BASE}/databases/${databaseId}/induction_quality`, { signal }).then(r => r.json()),
+        fetch(`${API_BASE}/databases/${databaseId}/bad_hostpics`, { signal }).then(r => r.json()),
+        fetch(`${API_BASE}/databases/${databaseId}/good_hostpics`, { signal }).then(r => r.json()),
+      ]);
+      if (signal.aborted) return;
+      setInductionQuality(iq.status === 'fulfilled' ? iq.value : { data: [] });
+      setBadHostpics(bad.status === 'fulfilled' ? bad.value : { data: [], total: 0 });
+      setGoodHostpics(good.status === 'fulfilled' ? good.value : { data: [], total: 0 });
+    } catch (e) {
+      if (!signal.aborted) throw e;
+    }
   };
 
   // Efecto para cargar logs y estadísticas cuando cambia la base de datos
@@ -192,7 +203,7 @@ function LogAnalyzerApp() {
           <UploadTab
             onUploadSuccess={(result) => {
               setUploadStatus(result);
-              fetchDatabases();
+              fetchDatabases(true);
             }}
             uploadStatus={uploadStatus}
             customers={customers}
@@ -1007,7 +1018,10 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
           ) : (
             <div className="text-center py-10 text-gray-400">
               <Activity className="mx-auto h-10 w-10 mb-2 text-gray-300" />
-              <p className="text-sm">No se encontraron datos de inducción en esta base de datos.</p>
+              {inductionQuality.error
+                ? <p className="text-sm text-orange-500">{inductionQuality.error}</p>
+                : <p className="text-sm">No se encontraron datos de inducción en esta base de datos.</p>
+              }
               {inductionQuality.columns_found && (
                 <p className="text-xs mt-2">
                   hostpic: {inductionQuality.columns_found.hostpic ? '✓' : '✗'}&nbsp;
