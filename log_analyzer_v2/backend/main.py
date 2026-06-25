@@ -28,14 +28,17 @@ def load_customer_configs():
     if not os.path.exists(configs_dir):
         logger.warning(f"configs/ directory not found at {configs_dir}")
         return
+
+    # Cargar configs completos (cualquier JSON que tenga campo "id" como objeto)
     for fname in sorted(os.listdir(configs_dir)):
-        if not fname.endswith('.json'):
+        if not fname.endswith('.json') or fname == 'clients_registry.json':
             continue
         path = os.path.join(configs_dir, fname)
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 cfg = json.load(f)
-            # Tabla inversa código → zona para lookup O(1)
+            if not isinstance(cfg, dict) or 'id' not in cfg:
+                continue
             cfg['_zone_reverse'] = {
                 code: zone
                 for zone in cfg.get('zones', [])
@@ -46,13 +49,28 @@ def load_customer_configs():
         except Exception as e:
             logger.error(f"Failed to load config {fname}: {e}")
 
+    # Cargar registro de clientes (entradas mínimas sin analytics)
+    registry_path = os.path.join(configs_dir, 'clients_registry.json')
+    if os.path.exists(registry_path):
+        try:
+            with open(registry_path, 'r', encoding='utf-8') as f:
+                registry = json.load(f)
+            added = 0
+            for entry in registry:
+                cid = entry.get('id')
+                if cid and cid not in CUSTOMER_CONFIGS:
+                    CUSTOMER_CONFIGS[cid] = entry
+                    added += 1
+            logger.info(f"Loaded {added} clients from registry ({len(registry)} total entries)")
+        except Exception as e:
+            logger.error(f"Failed to load clients registry: {e}")
+
 def get_customer_config(customer_id: Optional[str]) -> Optional[Dict]:
-    """Devuelve el config del cliente, con fallback al primero disponible"""
-    if customer_id and customer_id in CUSTOMER_CONFIGS:
-        return CUSTOMER_CONFIGS[customer_id]
-    if CUSTOMER_CONFIGS:
-        return next(iter(CUSTOMER_CONFIGS.values()))
-    return None
+    """Devuelve el config del cliente. Si no hay customer_id, usa el primero con analytics completo."""
+    if customer_id:
+        return CUSTOMER_CONFIGS.get(customer_id)
+    # Backward compat: bases de datos antiguas sin customer_id → primer config completo
+    return next((cfg for cfg in CUSTOMER_CONFIGS.values() if cfg.get('good_package')), None)
 
 def find_column(columns: List[str], *patterns: str) -> Optional[str]:
     """Busca en columns cualquier nombre que coincida con los patrones (ignora mayúsculas y guiones bajos)"""
@@ -1085,8 +1103,8 @@ async def get_induction_quality(database_id: str):
         columns = json.loads(db_info['columns_info'] or '[]')
         safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
         cfg = get_customer_config(db_info['customer_id'])
-        if not cfg:
-            return {"data": [], "error": "No customer config available"}
+        if not cfg or not cfg.get('good_package') or not cfg.get('bad_package'):
+            return {"data": [], "error": "Analytics not configured for this customer"}
 
         hostpic_col    = find_column(columns, cfg.get('hostpic_column', 'hostpic'))
         ep_cfg         = cfg.get('entry_point', {})
@@ -1178,7 +1196,7 @@ async def get_bad_hostpics(database_id: str):
         columns = json.loads(db_info['columns_info'] or '[]')
         safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
         cfg = get_customer_config(db_info['customer_id'])
-        if not cfg:
+        if not cfg or not cfg.get('good_package') or not cfg.get('bad_package'):
             return {"data": [], "total": 0}
 
         hostpic_col    = find_column(columns, cfg.get('hostpic_column', 'hostpic'))
@@ -1232,7 +1250,7 @@ async def get_good_hostpics(database_id: str):
         columns = json.loads(db_info['columns_info'] or '[]')
         safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
         cfg = get_customer_config(db_info['customer_id'])
-        if not cfg:
+        if not cfg or not cfg.get('good_package') or not cfg.get('bad_package'):
             return {"data": [], "total": 0}
 
         hostpic_col    = find_column(columns, cfg.get('hostpic_column', 'hostpic'))
