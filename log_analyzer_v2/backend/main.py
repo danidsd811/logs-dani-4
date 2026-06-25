@@ -1103,6 +1103,12 @@ async def get_induction_quality(database_id: str):
         table_name = db_info['table_name']
         columns = json.loads(db_info['columns_info'] or '[]')
         safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+        if not columns:
+            col_rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
+                table_name
+            )
+            columns = [r['column_name'] for r in col_rows]
         cfg = get_customer_config(db_info['customer_id'])
         if not cfg or not cfg.get('good_package') or not cfg.get('bad_package'):
             return {"data": [], "error": "Analytics not configured for this customer"}
@@ -1196,6 +1202,12 @@ async def get_bad_hostpics(database_id: str):
         table_name = db_info['table_name']
         columns = json.loads(db_info['columns_info'] or '[]')
         safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+        if not columns:
+            col_rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
+                table_name
+            )
+            columns = [r['column_name'] for r in col_rows]
         cfg = get_customer_config(db_info['customer_id'])
         if not cfg or not cfg.get('good_package') or not cfg.get('bad_package'):
             return {"data": [], "total": 0}
@@ -1250,6 +1262,12 @@ async def get_good_hostpics(database_id: str):
         table_name = db_info['table_name']
         columns = json.loads(db_info['columns_info'] or '[]')
         safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+        if not columns:
+            col_rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
+                table_name
+            )
+            columns = [r['column_name'] for r in col_rows]
         cfg = get_customer_config(db_info['customer_id'])
         if not cfg or not cfg.get('good_package') or not cfg.get('bad_package'):
             return {"data": [], "total": 0}

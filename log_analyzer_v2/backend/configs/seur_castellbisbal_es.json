@@ -1,20 +1,18 @@
 {
-  "id": "seur_operaciones_barcelona_es",
-  "name": "Seur Operaciones Barcelona ES",
+  "id": "seur_castellbisbal_es",
+  "name": "SEUR Castellbisbal ES",
   "charts": ["induction_quality"],
   "hostpic_column": "hostpic",
   "entry_point": {
-    "column": "parcelentrypoint",
-    "column_aliases": ["entrance_point", "entrypoint", "entry_point"],
+    "column": "parcelentrancepoint",
+    "column_aliases": ["parcel_entrance_point", "entrancepoint", "entrance_point"],
     "pattern": "0*50\\.([0-9]{2})\\.",
     "group": 1
   },
   "zones": [
-    {"id": 1,  "name": "INFEED 1",           "codes": ["11","12","13"]},
-    {"id": 2,  "name": "INFEED 2",           "codes": ["15","16","17"]},
-    {"id": 3,  "name": "INFEED 3",           "codes": ["19","20","21"]},
-    {"id": 4,  "name": "INFEED 4",           "codes": ["23","24","25"]},
-    {"id": 5,  "name": "INFEED 5",           "codes": ["27","28","29"]},
+    {"id": 1,  "name": "INFEED 1",           "codes": ["31","32","33"]},
+    {"id": 2,  "name": "INFEED 2",           "codes": ["41","42","43"]},
+    {"id": 3,  "name": "INFEED 3",           "codes": ["51","52","53"]},
     {"id": 99, "name": "Loop del Crossorter","codes": []}
   ],
   "default_zone_id": 99,

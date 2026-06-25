@@ -30,7 +30,7 @@ function LogAnalyzerApp() {
     fetchDatabases();
     fetch(`${API_BASE}/customers`)
       .then(r => r.json())
-      .then(setCustomers)
+      .then(data => setCustomers([...data].sort((a, b) => a.name.localeCompare(b.name))))
       .catch(() => {});
   }, []);
 
