@@ -16,6 +16,7 @@ function LogAnalyzerApp() {
   const [inductionQuality, setInductionQuality] = useState(null);
   const [badHostpics, setBadHostpics] = useState(null);
   const [goodHostpics, setGoodHostpics] = useState(null);
+  const [sortQuality, setSortQuality] = useState(null);
   const [customers, setCustomers] = useState([]);
   const analyticsAbortRef = useRef(null);
 
@@ -96,16 +97,19 @@ function LogAnalyzerApp() {
     setInductionQuality(null);
     setBadHostpics(null);
     setGoodHostpics(null);
+    setSortQuality(null);
     try {
-      const [iq, bad, good] = await Promise.allSettled([
+      const [iq, bad, good, sq] = await Promise.allSettled([
         fetch(`${API_BASE}/databases/${databaseId}/induction_quality`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/bad_hostpics`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/good_hostpics`, { signal }).then(r => r.json()),
+        fetch(`${API_BASE}/databases/${databaseId}/sort_quality`, { signal }).then(r => r.json()),
       ]);
       if (signal.aborted) return;
       setInductionQuality(iq.status === 'fulfilled' ? iq.value : { data: [] });
       setBadHostpics(bad.status === 'fulfilled' ? bad.value : { data: [], total: 0 });
       setGoodHostpics(good.status === 'fulfilled' ? good.value : { data: [], total: 0 });
+      setSortQuality(sq.status === 'fulfilled' ? sq.value : { data: [] });
     } catch (e) {
       if (!signal.aborted) throw e;
     }
@@ -237,6 +241,7 @@ function LogAnalyzerApp() {
             inductionQuality={inductionQuality}
             badHostpics={badHostpics}
             goodHostpics={goodHostpics}
+            sortQuality={sortQuality}
           />
         )}
       </main>
@@ -829,7 +834,20 @@ function aggregateByInfeed(rows) {
 }
 
 // Componente de Gráficos y Análisis
-function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, inductionQuality, badHostpics, goodHostpics }) {
+const ODS_LABELS = {
+  '1': 'Diverted',           '2': 'Dest. not reached',    '3': 'Dest. not available',
+  '4': 'Failed to divert',   '5': 'Invalid destination',  '6': 'Unreachable dest.',
+  '7': 'Dest. not received', '8': 'Condition invalid',    '9': 'Dest. not requested',
+  'A': 'Flow restricted',    'B': 'Max. recirculation',   'C': 'Dest. override',
+  '0': 'Unknown state',
+};
+const ODS_COLORS = {
+  '1': '#10B981', '2': '#EF4444', '3': '#F97316', '4': '#F59E0B',
+  '5': '#6366F1', '6': '#EC4899', '7': '#8B5CF6', '8': '#0EA5E9',
+  '9': '#14B8A6', 'A': '#84CC16', 'B': '#991B1B', 'C': '#64748B', '0': '#9CA3AF',
+};
+
+function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, inductionQuality, badHostpics, goodHostpics, sortQuality }) {
   const [filterChartHour, setFilterChartHour] = useState('');
 
   const hours = useMemo(() => {
@@ -844,6 +862,35 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
       : inductionQuality.data.filter(r => r.hour === filterChartHour);
     return aggregateByInfeed(rows);
   }, [inductionQuality, filterChartHour]);
+
+  const [sortMinimized, setSortMinimized] = useState(false);
+  const [inductionMinimized, setInductionMinimized] = useState(false);
+
+  const sortChartData = useMemo(() => {
+    if (!sortQuality?.data?.length) return { rows: [], infeeds: [] };
+    const data = sortQuality.data;
+
+    // Infeeds ordenados por zone_id
+    const infeedMap = {};
+    data.forEach(r => { infeedMap[r.zone_id] = { zone_id: r.zone_id, zone_name: r.zone_name }; });
+    const infeeds = Object.values(infeedMap).sort((a, b) => a.zone_id - b.zone_id).map(z => z.zone_name);
+
+    // Estados ordenados: ODS=1 primero, resto alfanumérico
+    const states = [...new Set(data.map(r => r.state))].sort((a, b) => {
+      if (a === '1') return -1;
+      if (b === '1') return 1;
+      return a.localeCompare(b);
+    });
+
+    // Una fila por ODS, columnas = nombre de INFEED
+    const odsMap = {};
+    data.forEach(r => {
+      if (!odsMap[r.state]) odsMap[r.state] = { state: r.state };
+      odsMap[r.state][r.zone_name] = (odsMap[r.state][r.zone_name] || 0) + r.count;
+    });
+    const rows = states.map(s => odsMap[s]).filter(Boolean);
+    return { rows, infeeds };
+  }, [sortQuality]);
 
   useEffect(() => { setFilterChartHour(''); }, [selectedDatabase?.id]);
 
@@ -897,137 +944,275 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
         </div>
       </div>
 
+      {/* Calidad de Clasificación por ODS */}
+      {sortQuality !== null && !sortQuality.error && (
+        <div className="bg-white rounded-lg shadow overflow-hidden">
+          {/* Cabecera siempre visible con botón minimizar */}
+          <div
+            className="flex items-center justify-between px-6 py-4 cursor-pointer select-none hover:bg-gray-50"
+            onClick={() => setSortMinimized(v => !v)}
+          >
+            <div className="flex items-center gap-3">
+              <h3 className="text-lg font-medium text-gray-900">
+                Calidad de Clasificación por ODS
+              </h3>
+              {sortQuality?.customer && (
+                <span className="text-sm font-normal text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
+                  {sortQuality.customer}
+                </span>
+              )}
+              {sortQuality.data?.length > 0 && (() => {
+                const totalOk  = sortQuality.data.filter(r => r.state === '1').reduce((s, r) => s + r.count, 0);
+                const totalAll = sortQuality.data.reduce((s, r) => s + r.count, 0);
+                const pct      = totalAll > 0 ? ((totalOk / totalAll) * 100).toFixed(1) : null;
+                return pct !== null && (
+                  <span className={`text-sm font-semibold px-2 py-0.5 rounded ${parseFloat(pct) >= 90 ? 'bg-green-100 text-green-700' : parseFloat(pct) >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
+                    {pct}% clasificados
+                  </span>
+                );
+              })()}
+            </div>
+            <span className="text-gray-400 text-lg font-bold">{sortMinimized ? '▸' : '▾'}</span>
+          </div>
+
+          {/* Cuerpo colapsable */}
+          {!sortMinimized && (
+            <div className="px-6 pb-6">
+              <p className="text-sm text-gray-500 mb-4">
+                Paquetes únicos (HOSTPIC × ODS) agrupados por estado · cada color = punto de entrada
+              </p>
+              {sortQuality.data?.length > 0 ? (
+                <>
+                  {(() => {
+                    const totalOk  = sortQuality.data.filter(r => r.state === '1').reduce((s, r) => s + r.count, 0);
+                    const totalAll = sortQuality.data.reduce((s, r) => s + r.count, 0);
+                    const pct      = totalAll > 0 ? ((totalOk / totalAll) * 100).toFixed(1) : null;
+                    return (
+                      <div className="grid grid-cols-3 gap-4 mb-6">
+                        <div className="bg-green-50 border border-green-200 p-4 rounded-lg">
+                          <p className="text-xs font-medium text-gray-500 uppercase">Clasificados (ODS=1)</p>
+                          <p className="text-2xl font-bold text-green-700 mt-1">{totalOk.toLocaleString()}</p>
+                        </div>
+                        <div className="bg-red-50 border border-red-200 p-4 rounded-lg">
+                          <p className="text-xs font-medium text-gray-500 uppercase">Otros estados</p>
+                          <p className="text-2xl font-bold text-red-700 mt-1">{(totalAll - totalOk).toLocaleString()}</p>
+                        </div>
+                        <div className="bg-blue-50 border border-blue-200 p-4 rounded-lg">
+                          <p className="text-xs font-medium text-gray-500 uppercase">% Clasificados</p>
+                          <p className={`text-2xl font-bold mt-1 ${parseFloat(pct) >= 90 ? 'text-green-700' : parseFloat(pct) >= 70 ? 'text-yellow-600' : 'text-red-700'}`}>
+                            {pct !== null ? `${pct}%` : 'N/A'}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  <ResponsiveContainer width="100%" height={320}>
+                    <BarChart data={sortChartData.rows} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis
+                        dataKey="state"
+                        tick={{ fontSize: 11 }}
+                        tickFormatter={v => `${v} · ${ODS_LABELS[v] || v}`}
+                        interval={0}
+                        angle={-20}
+                        textAnchor="end"
+                        height={50}
+                      />
+                      <YAxis tick={{ fontSize: 12 }} />
+                      <Tooltip
+                        content={({ active, payload, label }) => {
+                          if (!active || !payload?.length) return null;
+                          const total = payload.reduce((s, p) => s + (p.value || 0), 0);
+                          return (
+                            <div className="bg-white border border-gray-200 rounded-lg p-3 shadow text-sm max-w-xs">
+                              <p className="font-semibold text-gray-800 mb-1">ODS {label} — {ODS_LABELS[label] || label}</p>
+                              <p className="text-xs text-gray-400 mb-2">Total: {total.toLocaleString()}</p>
+                              {payload.filter(p => p.value > 0).map(p => (
+                                <p key={p.dataKey} style={{ color: p.fill }}>
+                                  {p.dataKey}: {p.value.toLocaleString()}
+                                </p>
+                              ))}
+                            </div>
+                          );
+                        }}
+                      />
+                      <Legend />
+                      {sortChartData.infeeds.map((infeed, i) => (
+                        <Bar key={infeed} dataKey={infeed} stackId="s"
+                          fill={['#3B82F6','#8B5CF6','#F97316','#10B981','#EC4899','#0EA5E9','#9CA3AF'][i % 7]} />
+                      ))}
+                    </BarChart>
+                  </ResponsiveContainer>
+                </>
+              ) : (
+                <div className="text-center py-10 text-gray-400">
+                  <Activity className="mx-auto h-10 w-10 mb-2 text-gray-300" />
+                  <p className="text-sm">No se encontraron datos de clasificación en esta base de datos.</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Calidad de Inducción por Infeed */}
-      {inductionQuality !== null && (
-        <div className="bg-white p-6 rounded-lg shadow">
-          <div className="flex items-center justify-between mb-1 flex-wrap gap-3">
-            <h3 className="text-lg font-medium text-gray-900">
-              Calidad de Inducción por Infeed
+      {inductionQuality !== null && !inductionQuality.error && (
+        <div className="bg-white rounded-lg shadow overflow-hidden">
+          {/* Cabecera siempre visible con botón minimizar */}
+          <div
+            className="flex items-center justify-between px-6 py-4 cursor-pointer select-none hover:bg-gray-50"
+            onClick={() => setInductionMinimized(v => !v)}
+          >
+            <div className="flex items-center gap-3">
+              <h3 className="text-lg font-medium text-gray-900">
+                Calidad de Inducción por Infeed
+              </h3>
               {inductionQuality?.customer && (
-                <span className="ml-2 text-sm font-normal text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
+                <span className="text-sm font-normal text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
                   {inductionQuality.customer}
                 </span>
               )}
-            </h3>
-            {hours.length > 0 && (
-              <select
-                value={filterChartHour}
-                onChange={e => setFilterChartHour(e.target.value === '' ? '' : parseInt(e.target.value))}
-                className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
-              >
-                <option value="">Todas las horas</option>
-                {hours.map(h => (
-                  <option key={h} value={h}>{String(h).padStart(2,'0')}:00 – {String(h).padStart(2,'0')}:59</option>
-                ))}
-              </select>
-            )}
-          </div>
-          <p className="text-sm text-gray-500 mb-4">
-            Correctos: msg20 con lastDest≠998 &nbsp;|&nbsp; Incorrectos: msg21 con lastDest=998
-          </p>
-
-          {inductionQuality.data && inductionQuality.data.length > 0 ? (
-            <>
-              {(() => {
-                const totalGood = chartData.reduce((s, d) => s + d.good, 0);
-                const totalBad  = chartData.reduce((s, d) => s + d.bad,  0);
+              {inductionQuality.data?.length > 0 && (() => {
+                const totalGood = inductionQuality.data.reduce((s, d) => s + d.good, 0);
+                const totalBad  = inductionQuality.data.reduce((s, d) => s + d.bad,  0);
                 const totalAll  = totalGood + totalBad;
-                const globalPct = totalAll > 0 ? ((totalGood / totalAll) * 100).toFixed(1) : null;
-                return (
-                  <div className="grid grid-cols-3 gap-4 mb-6">
-                    <div className="bg-green-50 border border-green-200 p-4 rounded-lg">
-                      <p className="text-xs font-medium text-gray-500 uppercase">Total Correctos</p>
-                      <p className="text-2xl font-bold text-green-700 mt-1">{totalGood.toLocaleString()}</p>
-                    </div>
-                    <div className="bg-red-50 border border-red-200 p-4 rounded-lg">
-                      <p className="text-xs font-medium text-gray-500 uppercase">Total Incorrectos</p>
-                      <p className="text-2xl font-bold text-red-700 mt-1">{totalBad.toLocaleString()}</p>
-                    </div>
-                    <div className="bg-blue-50 border border-blue-200 p-4 rounded-lg">
-                      <p className="text-xs font-medium text-gray-500 uppercase">Calidad Global</p>
-                      <p className={`text-2xl font-bold mt-1 ${parseFloat(globalPct) >= 90 ? 'text-green-700' : parseFloat(globalPct) >= 70 ? 'text-yellow-600' : 'text-red-700'}`}>
-                        {globalPct !== null ? `${globalPct}%` : 'N/A'}
-                      </p>
-                    </div>
-                  </div>
+                const pct       = totalAll > 0 ? ((totalGood / totalAll) * 100).toFixed(1) : null;
+                return pct !== null && (
+                  <span className={`text-sm font-semibold px-2 py-0.5 rounded ${parseFloat(pct) >= 90 ? 'bg-green-100 text-green-700' : parseFloat(pct) >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
+                    {pct}% correctos
+                  </span>
                 );
               })()}
+            </div>
+            <span className="text-gray-400 text-lg font-bold">{inductionMinimized ? '▸' : '▾'}</span>
+          </div>
 
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={chartData} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="infeed" tick={{ fontSize: 11 }} tickFormatter={(v) => v === 'Loop del Crossorter' ? 'Loop' : v} />
-                  <YAxis tick={{ fontSize: 12 }} />
-                  <Tooltip
-                    content={({ active, payload, label }) => {
-                      if (!active || !payload?.length) return null;
-                      const good  = payload.find(p => p.dataKey === 'good')?.value || 0;
-                      const bad   = payload.find(p => p.dataKey === 'bad')?.value  || 0;
-                      const total = good + bad;
-                      return (
-                        <div className="bg-white border border-gray-200 rounded-lg p-3 shadow text-sm">
-                          <p className="font-semibold text-gray-800 mb-2">{label}</p>
-                          <p className="text-green-600">✓ Correctos: {good.toLocaleString()} ({total ? ((good / total) * 100).toFixed(1) : 0}%)</p>
-                          <p className="text-red-600">✗ Incorrectos: {bad.toLocaleString()} ({total ? ((bad / total) * 100).toFixed(1) : 0}%)</p>
-                          <p className="text-gray-500 mt-2 border-t pt-1">Total: {total.toLocaleString()}</p>
-                        </div>
-                      );
-                    }}
-                  />
-                  <Legend formatter={(v) => v === 'good' ? 'Correctos' : 'Incorrectos'} />
-                  <Bar dataKey="good" name="good" stackId="s" fill="#10B981" />
-                  <Bar dataKey="bad"  name="bad"  stackId="s" fill="#EF4444" />
-                </BarChart>
-              </ResponsiveContainer>
-
-              <div className="mt-6 overflow-x-auto">
-                <table className="min-w-full text-sm divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Infeed</th>
-                      <th className="px-4 py-2 text-right text-xs font-medium text-green-600 uppercase">Correctos</th>
-                      <th className="px-4 py-2 text-right text-xs font-medium text-red-600 uppercase">Incorrectos</th>
-                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Total</th>
-                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">% Correctos</th>
-                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">% Incorrectos</th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-100">
-                    {chartData.map((row, idx) => (
-                      <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                        <td className="px-4 py-2 font-medium text-gray-900">{row.infeed}</td>
-                        <td className="px-4 py-2 text-right text-green-600 font-medium">{row.good.toLocaleString()}</td>
-                        <td className="px-4 py-2 text-right text-red-600 font-medium">{row.bad.toLocaleString()}</td>
-                        <td className="px-4 py-2 text-right font-semibold">{row.total.toLocaleString()}</td>
-                        <td className="px-4 py-2 text-right">
-                          <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${
-                            row.good_pct >= 90 ? 'bg-green-100 text-green-800' :
-                            row.good_pct >= 70 ? 'bg-yellow-100 text-yellow-800' :
-                                                  'bg-red-100 text-red-800'
-                          }`}>
-                            {row.good_pct}%
-                          </span>
-                        </td>
-                        <td className="px-4 py-2 text-right text-gray-500">{row.bad_pct}%</td>
-                      </tr>
+          {/* Cuerpo colapsable */}
+          {!inductionMinimized && (
+            <div className="px-6 pb-6">
+              {hours.length > 0 && (
+                <div className="flex justify-end mb-3">
+                  <select
+                    value={filterChartHour}
+                    onChange={e => setFilterChartHour(e.target.value === '' ? '' : parseInt(e.target.value))}
+                    className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                  >
+                    <option value="">Todas las horas</option>
+                    {hours.map(h => (
+                      <option key={h} value={h}>{String(h).padStart(2,'0')}:00 – {String(h).padStart(2,'0')}:59</option>
                     ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          ) : (
-            <div className="text-center py-10 text-gray-400">
-              <Activity className="mx-auto h-10 w-10 mb-2 text-gray-300" />
-              {inductionQuality.error
-                ? <p className="text-sm text-orange-500">{inductionQuality.error}</p>
-                : <p className="text-sm">No se encontraron datos de inducción en esta base de datos.</p>
-              }
-              {inductionQuality.columns_found && (
-                <p className="text-xs mt-2">
-                  hostpic: {inductionQuality.columns_found.hostpic ? '✓' : '✗'}&nbsp;
-                  lastdestination: {inductionQuality.columns_found.last_destination ? '✓' : '✗'}&nbsp;
-                  parcelentrypoint: {inductionQuality.columns_found.parcel_entry_point ? '✓' : '✗'}
-                </p>
+                  </select>
+                </div>
+              )}
+              <p className="text-sm text-gray-500 mb-4">
+                Correctos: msg20 con lastDest≠998 &nbsp;|&nbsp; Incorrectos: msg21 con lastDest=998
+              </p>
+
+              {inductionQuality.data && inductionQuality.data.length > 0 ? (
+                <>
+                  {(() => {
+                    const totalGood = chartData.reduce((s, d) => s + d.good, 0);
+                    const totalBad  = chartData.reduce((s, d) => s + d.bad,  0);
+                    const totalAll  = totalGood + totalBad;
+                    const globalPct = totalAll > 0 ? ((totalGood / totalAll) * 100).toFixed(1) : null;
+                    return (
+                      <div className="grid grid-cols-3 gap-4 mb-6">
+                        <div className="bg-green-50 border border-green-200 p-4 rounded-lg">
+                          <p className="text-xs font-medium text-gray-500 uppercase">Total Correctos</p>
+                          <p className="text-2xl font-bold text-green-700 mt-1">{totalGood.toLocaleString()}</p>
+                        </div>
+                        <div className="bg-red-50 border border-red-200 p-4 rounded-lg">
+                          <p className="text-xs font-medium text-gray-500 uppercase">Total Incorrectos</p>
+                          <p className="text-2xl font-bold text-red-700 mt-1">{totalBad.toLocaleString()}</p>
+                        </div>
+                        <div className="bg-blue-50 border border-blue-200 p-4 rounded-lg">
+                          <p className="text-xs font-medium text-gray-500 uppercase">Calidad Global</p>
+                          <p className={`text-2xl font-bold mt-1 ${parseFloat(globalPct) >= 90 ? 'text-green-700' : parseFloat(globalPct) >= 70 ? 'text-yellow-600' : 'text-red-700'}`}>
+                            {globalPct !== null ? `${globalPct}%` : 'N/A'}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  <ResponsiveContainer width="100%" height={300}>
+                    <BarChart data={chartData} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="infeed" tick={{ fontSize: 11 }} tickFormatter={(v) => v === 'Loop del Crossorter' ? 'Loop' : v} />
+                      <YAxis tick={{ fontSize: 12 }} />
+                      <Tooltip
+                        content={({ active, payload, label }) => {
+                          if (!active || !payload?.length) return null;
+                          const good  = payload.find(p => p.dataKey === 'good')?.value || 0;
+                          const bad   = payload.find(p => p.dataKey === 'bad')?.value  || 0;
+                          const total = good + bad;
+                          return (
+                            <div className="bg-white border border-gray-200 rounded-lg p-3 shadow text-sm">
+                              <p className="font-semibold text-gray-800 mb-2">{label}</p>
+                              <p className="text-green-600">✓ Correctos: {good.toLocaleString()} ({total ? ((good / total) * 100).toFixed(1) : 0}%)</p>
+                              <p className="text-red-600">✗ Incorrectos: {bad.toLocaleString()} ({total ? ((bad / total) * 100).toFixed(1) : 0}%)</p>
+                              <p className="text-gray-500 mt-2 border-t pt-1">Total: {total.toLocaleString()}</p>
+                            </div>
+                          );
+                        }}
+                      />
+                      <Legend formatter={(v) => v === 'good' ? 'Correctos' : 'Incorrectos'} />
+                      <Bar dataKey="good" name="good" stackId="s" fill="#10B981" />
+                      <Bar dataKey="bad"  name="bad"  stackId="s" fill="#EF4444" />
+                    </BarChart>
+                  </ResponsiveContainer>
+
+                  <div className="mt-6 overflow-x-auto">
+                    <table className="min-w-full text-sm divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Infeed</th>
+                          <th className="px-4 py-2 text-right text-xs font-medium text-green-600 uppercase">Correctos</th>
+                          <th className="px-4 py-2 text-right text-xs font-medium text-red-600 uppercase">Incorrectos</th>
+                          <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Total</th>
+                          <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">% Correctos</th>
+                          <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">% Incorrectos</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-100">
+                        {chartData.map((row, idx) => (
+                          <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                            <td className="px-4 py-2 font-medium text-gray-900">{row.infeed}</td>
+                            <td className="px-4 py-2 text-right text-green-600 font-medium">{row.good.toLocaleString()}</td>
+                            <td className="px-4 py-2 text-right text-red-600 font-medium">{row.bad.toLocaleString()}</td>
+                            <td className="px-4 py-2 text-right font-semibold">{row.total.toLocaleString()}</td>
+                            <td className="px-4 py-2 text-right">
+                              <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${
+                                row.good_pct >= 90 ? 'bg-green-100 text-green-800' :
+                                row.good_pct >= 70 ? 'bg-yellow-100 text-yellow-800' :
+                                                      'bg-red-100 text-red-800'
+                              }`}>
+                                {row.good_pct}%
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-right text-gray-500">{row.bad_pct}%</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              ) : (
+                <div className="text-center py-10 text-gray-400">
+                  <Activity className="mx-auto h-10 w-10 mb-2 text-gray-300" />
+                  {inductionQuality.error
+                    ? <p className="text-sm text-orange-500">{inductionQuality.error}</p>
+                    : <p className="text-sm">No se encontraron datos de inducción en esta base de datos.</p>
+                  }
+                  {inductionQuality.columns_found && (
+                    <p className="text-xs mt-2">
+                      hostpic: {inductionQuality.columns_found.hostpic ? '✓' : '✗'}&nbsp;
+                      lastdestination: {inductionQuality.columns_found.last_destination ? '✓' : '✗'}&nbsp;
+                      parcelentrypoint: {inductionQuality.columns_found.parcel_entry_point ? '✓' : '✗'}
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           )}

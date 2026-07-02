@@ -1,0 +1,25 @@
+{
+  "id": "correos_express_getafe_es",
+  "name": "Correos Express Getafe ES",
+  "charts": ["sort_quality"],
+  "hostpic_column": "hostpic",
+  "entry_point": {
+    "column": "parcelentrancepoint",
+    "column_aliases": ["parcel_entrance_point", "entrancepoint", "entrance_point", "parcelentrypoint", "parcel_entry_point"],
+    "pattern": "(010[1-6])\\d{2}",
+    "group": 1
+  },
+  "zones": [
+    {"id": 1,  "name": "INFEED 1",            "codes": ["0101"]},
+    {"id": 2,  "name": "INFEED 2",            "codes": ["0102"]},
+    {"id": 3,  "name": "INFEED 3",            "codes": ["0103"]},
+    {"id": 4,  "name": "INFEED 4",            "codes": ["0104"]},
+    {"id": 5,  "name": "INFEED 5",            "codes": ["0105"]},
+    {"id": 6,  "name": "INFEED 6",            "codes": ["0106"]},
+    {"id": 99, "name": "Loop del Posisorter", "codes": []}
+  ],
+  "default_zone_id": 99,
+  "sort_report": {
+    "message_id": 20
+  }
+}

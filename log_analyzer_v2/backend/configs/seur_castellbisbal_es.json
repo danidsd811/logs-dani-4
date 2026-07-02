@@ -1,7 +1,7 @@
 {
   "id": "seur_castellbisbal_es",
   "name": "SEUR Castellbisbal ES",
-  "charts": ["induction_quality"],
+  "charts": ["induction_quality", "sort_quality"],
   "hostpic_column": "hostpic",
   "entry_point": {
     "column": "parcelentrancepoint",
@@ -16,6 +16,9 @@
     {"id": 99, "name": "Loop del Crossorter","codes": []}
   ],
   "default_zone_id": 99,
+  "sort_report": {
+    "message_id": 20
+  },
   "good_package": {
     "message_id": 20,
     "conditions": [

@@ -1308,6 +1308,77 @@ async def get_good_hostpics(database_id: str):
         return {"data": data, "total": len(data)}
 
 
+@app.get("/databases/{database_id}/sort_quality")
+async def get_sort_quality(database_id: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        db_info = await conn.fetchrow(
+            "SELECT table_name, columns_info, customer_id FROM databases WHERE id = $1",
+            database_id
+        )
+        if not db_info:
+            raise HTTPException(404, "Database not found")
+
+        table_name = db_info['table_name']
+        columns    = json.loads(db_info['columns_info'] or '[]')
+        safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+        if not columns:
+            col_rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
+                table_name
+            )
+            columns = [r['column_name'] for r in col_rows]
+
+        cfg = get_customer_config(db_info['customer_id'])
+        if not cfg or 'sort_report' not in cfg or 'sort_quality' not in cfg.get('charts', []):
+            return {"data": [], "error": "Sort quality not configured for this customer"}
+
+        sort_cfg       = cfg['sort_report']
+        msg_id         = sort_cfg['message_id']
+        state_col_name = sort_cfg.get('state_column', 'originaldestinationstate')
+
+        ep_cfg         = cfg.get('entry_point', {})
+        hostpic_col    = find_column(columns, cfg.get('hostpic_column', 'hostpic'))
+        entrypoint_col = find_column(columns, ep_cfg.get('column', 'parcelentrancepoint'), *ep_cfg.get('column_aliases', []))
+        state_col      = find_column(columns, state_col_name, 'original_destination_state', 'originaldestinationstate')
+
+        columns_found = {
+            'hostpic':     bool(hostpic_col),
+            'entry_point': bool(entrypoint_col),
+            'state':       bool(state_col),
+        }
+        if not all(columns_found.values()):
+            return {"data": [], "error": "Required columns not found", "columns_found": columns_found}
+
+        # DISTINCT (hostpic, entry_point, state): cada par único (hostpic, ODS) cuenta una vez
+        rows = await conn.fetch(f"""
+            SELECT DISTINCT
+                TRIM({hostpic_col})    AS hp,
+                TRIM({entrypoint_col}) AS ep,
+                TRIM({state_col})      AS ods
+            FROM {safe_table}
+            WHERE message_id = {msg_id}
+              AND TRIM({hostpic_col})    NOT IN ('-', '-1', '')
+              AND TRIM({entrypoint_col}) NOT IN ('-', '')
+              AND TRIM({state_col})      NOT IN ('-', '')
+        """)
+
+        counts: Dict[tuple, int] = {}
+        for row in rows:
+            zone = get_zone_for_entry_point(str(row['ep']), cfg)
+            key  = (zone['id'], zone['name'], str(row['ods']))
+            counts[key] = counts.get(key, 0) + 1
+
+        zone_order = {z['id']: i for i, z in enumerate(cfg.get('zones', []))}
+        result = [
+            {'zone_id': zid, 'zone_name': zname, 'state': ods, 'count': cnt}
+            for (zid, zname, ods), cnt in counts.items()
+        ]
+        result.sort(key=lambda r: (zone_order.get(r['zone_id'], 99), r['state']))
+
+        return {"data": result, "customer": cfg['name'], "columns_found": columns_found}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
