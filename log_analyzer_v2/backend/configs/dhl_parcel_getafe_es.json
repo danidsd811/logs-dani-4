@@ -2,7 +2,32 @@
   "id": "dhl_parcel_getafe_es",
   "name": "DHL Parcel Hub Getafe ES",
   "crossorter_xxl": true,
-  "charts": ["induction_quality", "sort_quality"],
+  "charts": ["induction_quality", "sort_quality", "scale_quality"],
+  "scale_quality": {
+    "message_id": 20,
+    "field": "scanner_data_3",
+    "ok_prefix": "6",
+    "ok_contains": "g",
+    "no_scan_value": "1  0",
+    "error_codes": {
+      "1": "No Data received",
+      "2": "Data too short",
+      "3": "Data too long",
+      "4": "No weight",
+      "7": "Data not OK",
+      "8": "Too light",
+      "9": "Too heavy"
+    },
+    "exclude_from_pct": ["8", "9"],
+    "pre_scale_entry_points": [
+      "50.24.01",
+      "50.27.01",
+      "50.33.01",
+      "50.58.01",
+      "50.61.01",
+      "50.64.01"
+    ]
+  },
   "hostpic_column": "hostpic",
   "entry_point": {
     "column": "parcelentrancepoint",

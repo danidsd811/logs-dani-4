@@ -1398,6 +1398,164 @@ async def get_sort_quality(database_id: str):
         return {"data": result, "customer": cfg['name'], "columns_found": columns_found}
 
 
+@app.get("/databases/{database_id}/scale_quality")
+async def get_scale_quality(database_id: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        db_info = await conn.fetchrow(
+            "SELECT table_name, columns_info, customer_id FROM databases WHERE id = $1",
+            database_id
+        )
+        if not db_info:
+            raise HTTPException(404, "Database not found")
+
+        table_name = db_info['table_name']
+        columns    = json.loads(db_info['columns_info'] or '[]')
+        safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+        if not columns:
+            col_rows = await conn.fetch(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
+                table_name
+            )
+            columns = [r['column_name'] for r in col_rows]
+
+        cfg    = get_customer_config(db_info['customer_id'])
+        sq_cfg = cfg.get('scale_quality') if cfg else None
+        if not sq_cfg:
+            return {"data": [], "error": "Scale quality not configured for this customer"}
+
+        ep_cfg         = cfg.get('entry_point', {})
+        entrypoint_col = find_column(columns, ep_cfg.get('column', 'parcelentrypoint'), *ep_cfg.get('column_aliases', []))
+        field_name     = sq_cfg.get('field', 'scanner_data_3')
+        scale_col      = find_column(columns, field_name)
+        msg_id         = sq_cfg.get('message_id', 20)
+        ok_prefix      = sq_cfg.get('ok_prefix', '6')
+        ok_contains    = sq_cfg.get('ok_contains', '')
+        no_scan_value  = sq_cfg.get('no_scan_value', '')
+        error_codes      = sq_cfg.get('error_codes', {})
+        exclude_from_pct = set(sq_cfg.get('exclude_from_pct', []))
+        pre_scale_eps    = sq_cfg.get('pre_scale_entry_points', [])
+
+        def _is_pre_scale(ep_str: str) -> bool:
+            if not pre_scale_eps:
+                return True
+            normalized = re.sub(r'^0+', '', ep_str.strip())
+            return any(normalized == pep or normalized.startswith(pep + '.') for pep in pre_scale_eps)
+
+        if not entrypoint_col or not scale_col:
+            return {"data": [], "error": f"Columns not found (entry_point: {entrypoint_col}, scale: {scale_col})"}
+
+        # Condición OK: empieza por ok_prefix Y contiene ok_contains (ej. 'g' de gramos)
+        ok_condition     = f"LEFT(TRIM({scale_col}), 1) = '{ok_prefix}'"
+        ok_full          = ok_condition + (f" AND {scale_col} LIKE '%{ok_contains}%'" if ok_contains else "")
+        # Unknown: empieza por ok_prefix pero NO contiene ok_contains (6 sin 'g')
+        unknown_condition = (ok_condition + f" AND {scale_col} NOT LIKE '%{ok_contains}%'") if ok_contains else "FALSE"
+
+        # Normalizar espacios internos para comparación robusta (ej. "1  0", "1 0", "1   0" → "1 0")
+        no_scan_normalized = re.sub(r'\s+', ' ', no_scan_value.strip()) if no_scan_value else ''
+        no_scan_clause = (
+            f"WHEN regexp_replace(TRIM({scale_col}), '\\s+', ' ', 'g') = '{no_scan_normalized}' THEN 'noscan'"
+            if no_scan_normalized else ""
+        )
+
+        rows = await conn.fetch(f"""
+            SELECT ep, scale_code, COUNT(*) AS cnt
+            FROM (
+                SELECT {entrypoint_col} AS ep,
+                       CASE
+                           {no_scan_clause}
+                           WHEN {ok_full} THEN 'ok'
+                           WHEN {unknown_condition} THEN 'unknown'
+                           ELSE LEFT(TRIM({scale_col}), 1)
+                       END AS scale_code
+                FROM {safe_table}
+                WHERE message_id = {msg_id}
+                  AND TRIM({scale_col}) NOT IN ('-', '')
+                  AND {scale_col} IS NOT NULL
+            ) sub
+            GROUP BY ep, scale_code
+        """)
+
+        zone_stats:      Dict[int, Dict] = {}
+        otros_by_zone:   Dict[int, Dict] = {}
+        for row in rows:
+            ep_str = str(row['ep'] or '')
+            code   = row['scale_code']
+            count  = int(row['cnt'])
+            target = zone_stats if _is_pre_scale(ep_str) else otros_by_zone
+            zone   = get_zone_for_entry_point(ep_str, cfg)
+            zid    = zone['id']
+            if zid not in target:
+                target[zid] = {'zone': zone, 'ok': 0, 'noscan': 0, 'unknown': 0, 'errors': {}}
+            if code == 'ok':
+                target[zid]['ok'] += count
+            elif code == 'noscan':
+                target[zid]['noscan'] += count
+            elif code == 'unknown':
+                target[zid]['unknown'] += count
+            elif code in error_codes:
+                target[zid]['errors'][code] = target[zid]['errors'].get(code, 0) + count
+
+        result = []
+        zone_order = {z['id']: i for i, z in enumerate(cfg.get('zones', []))}
+
+        def _build_rows(stats_dict: Dict, is_other: bool) -> list:
+            rows_out = []
+            for zid, stats in sorted(stats_dict.items(), key=lambda x: zone_order.get(x[0], 99)):
+                ok           = stats['ok']
+                noscan       = stats['noscan']
+                unknown      = stats['unknown']
+                total_errors = sum(stats['errors'].values())
+                total        = ok + noscan + unknown + total_errors
+                if total == 0:
+                    continue
+                if is_other:
+                    ok_pct = None
+                else:
+                    excluded = sum(stats['errors'].get(c, 0) for c in exclude_from_pct)
+                    pct_base = total - excluded
+                    ok_pct   = round((ok / pct_base) * 100, 1) if pct_base > 0 else 0.0
+                row_data = {
+                    'infeed':     stats['zone']['name'],
+                    'infeed_num': zid,
+                    'ok':         ok,
+                    'noscan':     noscan,
+                    'unknown':    unknown,
+                    'total':      total,
+                    'ok_pct':     ok_pct,
+                    'is_other':   is_other,
+                }
+                for code in error_codes:
+                    row_data[f'err_{code}'] = stats['errors'].get(code, 0)
+                rows_out.append(row_data)
+            return rows_out
+
+        otros_rows = _build_rows(otros_by_zone, is_other=True)
+        if otros_rows:
+            otros_header = {
+                'infeed':     'Otros (paquetes registrados después de WSO)',
+                'infeed_num': -1,
+                'ok':         sum(r['ok']     for r in otros_rows),
+                'noscan':     sum(r['noscan'] for r in otros_rows),
+                'unknown':    sum(r['unknown'] for r in otros_rows),
+                'total':      sum(r['total']  for r in otros_rows),
+                'ok_pct':     None,
+                'is_other_header': True,
+            }
+            for code in error_codes:
+                otros_header[f'err_{code}'] = sum(r.get(f'err_{code}', 0) for r in otros_rows)
+            result = _build_rows(zone_stats, is_other=False) + [otros_header] + otros_rows
+        else:
+            result = _build_rows(zone_stats, is_other=False)
+
+        return {
+            'data':           result,
+            'error_codes':    error_codes,
+            'exclude_from_pct': list(exclude_from_pct),
+            'customer':       cfg['name'],
+        }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

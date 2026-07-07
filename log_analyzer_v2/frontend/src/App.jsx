@@ -17,6 +17,7 @@ function LogAnalyzerApp() {
   const [badHostpics, setBadHostpics] = useState(null);
   const [goodHostpics, setGoodHostpics] = useState(null);
   const [sortQuality, setSortQuality] = useState(null);
+  const [scaleQuality, setScaleQuality] = useState(null);
   const [customers, setCustomers] = useState([]);
   const analyticsAbortRef = useRef(null);
 
@@ -108,18 +109,21 @@ function LogAnalyzerApp() {
     setBadHostpics(null);
     setGoodHostpics(null);
     setSortQuality(null);
+    setScaleQuality(null);
     try {
-      const [iq, bad, good, sq] = await Promise.allSettled([
+      const [iq, bad, good, sq, scale] = await Promise.allSettled([
         fetch(`${API_BASE}/databases/${databaseId}/induction_quality`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/bad_hostpics`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/good_hostpics`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/sort_quality`, { signal }).then(r => r.json()),
+        fetch(`${API_BASE}/databases/${databaseId}/scale_quality`, { signal }).then(r => r.json()),
       ]);
       if (signal.aborted) return;
       setInductionQuality(iq.status === 'fulfilled' ? iq.value : { data: [] });
       setBadHostpics(bad.status === 'fulfilled' ? bad.value : { data: [], total: 0 });
       setGoodHostpics(good.status === 'fulfilled' ? good.value : { data: [], total: 0 });
       setSortQuality(sq.status === 'fulfilled' ? sq.value : { data: [] });
+      setScaleQuality(scale.status === 'fulfilled' ? scale.value : { data: [] });
     } catch (e) {
       if (!signal.aborted) throw e;
     }
@@ -252,6 +256,7 @@ function LogAnalyzerApp() {
             badHostpics={badHostpics}
             goodHostpics={goodHostpics}
             sortQuality={sortQuality}
+            scaleQuality={scaleQuality}
           />
         )}
       </main>
@@ -984,7 +989,7 @@ const ODS_COLORS = {
   '9': '#14B8A6', 'A': '#84CC16', 'B': '#991B1B', 'C': '#64748B', '0': '#9CA3AF',
 };
 
-function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, inductionQuality, badHostpics, goodHostpics, sortQuality }) {
+function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, inductionQuality, badHostpics, goodHostpics, sortQuality, scaleQuality }) {
   const [filterChartHour, setFilterChartHour] = useState('');
 
   const hours = useMemo(() => {
@@ -1002,6 +1007,8 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
 
   const [sortMinimized, setSortMinimized] = useState(false);
   const [inductionMinimized, setInductionMinimized] = useState(false);
+  const [scaleMinimized, setScaleMinimized] = useState(false);
+  const [otrosExpanded, setOtrosExpanded] = useState(false);
   const [hostpicsExpanded, setHostpicsExpanded] = useState(false);
 
   const sortChartData = useMemo(() => {
@@ -1030,7 +1037,7 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
     return { rows, infeeds };
   }, [sortQuality]);
 
-  useEffect(() => { setFilterChartHour(''); setHostpicsExpanded(false); }, [selectedDatabase?.id]);
+  useEffect(() => { setFilterChartHour(''); setHostpicsExpanded(false); setOtrosExpanded(false); }, [selectedDatabase?.id]);
 
   if (!selectedDatabase) {
     return (
@@ -1386,6 +1393,181 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
                   )}
                 </div>
               )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Calidad de Básculas por Infeed */}
+      {scaleQuality !== null && !scaleQuality.error && scaleQuality.data?.length > 0 && (
+        <div className="bg-white rounded-lg shadow overflow-hidden">
+          <div
+            className="flex items-center justify-between px-6 py-4 cursor-pointer select-none hover:bg-gray-50"
+            onClick={() => setScaleMinimized(v => !v)}
+          >
+            <div className="flex items-center gap-3">
+              <h3 className="text-lg font-medium text-gray-900">Calidad de Básculas por Infeed</h3>
+              {scaleQuality?.customer && (
+                <span className="text-sm font-normal text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
+                  {scaleQuality.customer}
+                </span>
+              )}
+              {(() => {
+                const pre      = scaleQuality.data.filter(r => !r.is_other && !r.is_other_header);
+                const excl     = scaleQuality.exclude_from_pct || [];
+                const totalOk  = pre.reduce((s, r) => s + r.ok, 0);
+                const excluded = pre.reduce((s, r) => s + excl.reduce((x, c) => x + (r[`err_${c}`] || 0), 0), 0);
+                const pctBase  = pre.reduce((s, r) => s + r.total, 0) - excluded;
+                const pct = pctBase > 0 ? ((totalOk / pctBase) * 100).toFixed(1) : null;
+                return pct !== null && (
+                  <span className={`text-sm font-semibold px-2 py-0.5 rounded ${parseFloat(pct) >= 90 ? 'bg-green-100 text-green-700' : parseFloat(pct) >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
+                    {pct}% OK
+                  </span>
+                );
+              })()}
+            </div>
+            <span className="text-gray-400 text-lg font-bold">{scaleMinimized ? '▸' : '▾'}</span>
+          </div>
+
+          {!scaleMinimized && (
+            <div className="px-6 pb-6">
+              {(() => {
+                const SCALE_COLORS = {
+                  ok: '#10B981', noscan: '#94A3B8', unknown: '#FCD34D',
+                  err_1: '#9CA3AF', err_2: '#F59E0B',
+                  err_3: '#F97316', err_4: '#8B5CF6', err_7: '#EF4444',
+                  err_8: '#3B82F6', err_9: '#EC4899',
+                };
+                const preRows  = scaleQuality.data.filter(r => !r.is_other && !r.is_other_header);
+                const excl     = scaleQuality.exclude_from_pct || [];
+                const totalOk  = preRows.reduce((s, r) => s + r.ok, 0);
+                const totalAll = preRows.reduce((s, r) => s + r.total, 0);
+                const excluded = preRows.reduce((s, r) => s + excl.reduce((x, c) => x + (r[`err_${c}`] || 0), 0), 0);
+                const pctBase  = totalAll - excluded;
+                const totalErr = pctBase - totalOk;
+                const pct      = pctBase > 0 ? ((totalOk / pctBase) * 100).toFixed(1) : null;
+                const errorCodes = Object.keys(scaleQuality.error_codes || {});
+                return (
+                  <>
+                    <div className="grid grid-cols-3 gap-4 mb-6 mt-2">
+                      <div className="bg-gray-50 border border-gray-200 p-4 rounded-lg">
+                        <p className="text-xs font-medium text-gray-500 uppercase">Total Pesajes</p>
+                        <p className="text-2xl font-bold text-gray-800 mt-1">{pctBase.toLocaleString()}</p>
+                      </div>
+                      <div className="bg-green-50 border border-green-200 p-4 rounded-lg">
+                        <p className="text-xs font-medium text-gray-500 uppercase">Data OK</p>
+                        <p className="text-2xl font-bold text-green-700 mt-1">{totalOk.toLocaleString()}</p>
+                        {pct && <p className="text-sm text-green-600 mt-1">{pct}%</p>}
+                      </div>
+                      <div className="bg-red-50 border border-red-200 p-4 rounded-lg">
+                        <p className="text-xs font-medium text-gray-500 uppercase">Errores</p>
+                        <p className="text-2xl font-bold text-red-700 mt-1">{totalErr.toLocaleString()}</p>
+                        {pct && <p className="text-sm text-red-600 mt-1">{(100 - parseFloat(pct)).toFixed(1)}%</p>}
+                      </div>
+                    </div>
+
+                    <ResponsiveContainer width="100%" height={300}>
+                      <BarChart data={scaleQuality.data.filter(r => !r.is_other && !r.is_other_header)} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="infeed" tick={{ fontSize: 11 }} tickFormatter={v => v === 'Loop del Crossorter' ? 'Loop' : v} />
+                        <YAxis tick={{ fontSize: 12 }} />
+                        <Tooltip
+                          content={({ active, payload, label }) => {
+                            if (!active || !payload?.length) return null;
+                            const total = payload.reduce((s, p) => s + (p.value || 0), 0);
+                            return (
+                              <div className="bg-white border border-gray-200 rounded-lg p-3 shadow text-sm">
+                                <p className="font-semibold text-gray-800 mb-2">{label}</p>
+                                {payload.filter(p => p.value > 0).map(p => (
+                                  <p key={p.dataKey} style={{ color: p.fill }}>{p.name}: {p.value.toLocaleString()}</p>
+                                ))}
+                                <p className="text-gray-500 mt-2 border-t pt-1">Total: {total.toLocaleString()}</p>
+                              </div>
+                            );
+                          }}
+                        />
+                        <Bar dataKey="ok" name="Data OK" stackId="s" fill={SCALE_COLORS.ok} />
+                        <Bar dataKey="noscan" name="No Scan" stackId="s" fill={SCALE_COLORS.noscan} />
+                        <Bar dataKey="unknown" name="Unknown (6 sin g)" stackId="s" fill={SCALE_COLORS.unknown} />
+                        {errorCodes.map(code => (
+                          <Bar key={code} dataKey={`err_${code}`} name={scaleQuality.error_codes[code]} stackId="s" fill={SCALE_COLORS[`err_${code}`] || '#9CA3AF'} />
+                        ))}
+                      </BarChart>
+                    </ResponsiveContainer>
+
+                    <div className="mt-6">
+                      <table className="w-full text-sm divide-y divide-gray-200">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase">Infeed</th>
+                            <th className="px-3 py-2 text-center font-medium text-green-600 uppercase">Data OK</th>
+                            <th className="px-3 py-2 text-center font-medium text-slate-500 uppercase">No Scan</th>
+                            <th className="px-3 py-2 text-center font-medium text-yellow-600 uppercase">Unknown</th>
+                            {errorCodes.map(code => (
+                              <th key={code} className="px-2 py-2 text-center font-medium text-red-500 uppercase leading-tight max-w-[72px]">
+                                {scaleQuality.error_codes[code]}
+                              </th>
+                            ))}
+                            <th className="px-3 py-2 text-center font-medium text-gray-500 uppercase">Total</th>
+                            <th className="px-3 py-2 text-center font-medium text-gray-500 uppercase">% OK</th>
+                          </tr>
+                        </thead>
+                        <tbody className="bg-white divide-y divide-gray-100">
+                          {scaleQuality.data.map((row, idx) => {
+                            if (row.is_other_header) return (
+                              <tr key={idx} className="bg-gray-200 border-t-2 border-gray-400 cursor-pointer select-none hover:bg-gray-300"
+                                  onClick={() => setOtrosExpanded(x => !x)}>
+                                <td className="px-3 py-2 font-semibold text-gray-600 italic">
+                                  <span className="mr-1 text-gray-500">{otrosExpanded ? '▾' : '▸'}</span>
+                                  {row.infeed}
+                                </td>
+                                <td className="px-3 py-2 text-center font-semibold text-gray-600">{row.ok.toLocaleString()}</td>
+                                <td className="px-3 py-2 text-center font-semibold text-gray-600">{(row.noscan || 0).toLocaleString()}</td>
+                                <td className="px-3 py-2 text-center font-semibold text-gray-600">{(row.unknown || 0).toLocaleString()}</td>
+                                {errorCodes.map(code => (
+                                  <td key={code} className="px-2 py-2 text-center font-semibold text-gray-600">{(row[`err_${code}`] || 0).toLocaleString()}</td>
+                                ))}
+                                <td className="px-3 py-2 text-center font-bold text-gray-700">{row.total.toLocaleString()}</td>
+                                <td className="px-3 py-2 text-center text-gray-400">—</td>
+                              </tr>
+                            );
+                            if (row.is_other) return otrosExpanded ? (
+                              <tr key={idx} className="bg-gray-50 text-gray-400 italic">
+                                <td className="px-3 py-2 font-medium text-gray-500 pl-7">↳ {row.infeed}</td>
+                                <td className="px-3 py-2 text-center">{row.ok.toLocaleString()}</td>
+                                <td className="px-3 py-2 text-center">{(row.noscan || 0).toLocaleString()}</td>
+                                <td className="px-3 py-2 text-center">{(row.unknown || 0).toLocaleString()}</td>
+                                {errorCodes.map(code => (
+                                  <td key={code} className="px-2 py-2 text-center">{(row[`err_${code}`] || 0).toLocaleString()}</td>
+                                ))}
+                                <td className="px-3 py-2 text-center font-semibold text-gray-500">{row.total.toLocaleString()}</td>
+                                <td className="px-3 py-2 text-center">—</td>
+                              </tr>
+                            ) : null;
+                            return (
+                              <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                                <td className="px-3 py-2 font-medium text-gray-900">{row.infeed}</td>
+                                <td className="px-3 py-2 text-center text-green-600 font-medium">{row.ok.toLocaleString()}</td>
+                                <td className="px-3 py-2 text-center text-slate-500">{(row.noscan || 0).toLocaleString()}</td>
+                                <td className="px-3 py-2 text-center text-yellow-600">{(row.unknown || 0).toLocaleString()}</td>
+                                {errorCodes.map(code => (
+                                  <td key={code} className="px-2 py-2 text-center text-red-500">{(row[`err_${code}`] || 0).toLocaleString()}</td>
+                                ))}
+                                <td className="px-3 py-2 text-center font-semibold">{row.total.toLocaleString()}</td>
+                                <td className="px-3 py-2 text-center">
+                                  <span className={`px-1.5 py-0.5 rounded-full text-xs font-semibold ${row.ok_pct >= 90 ? 'bg-green-100 text-green-800' : row.ok_pct >= 70 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
+                                    {row.ok_pct}%
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           )}
         </div>
