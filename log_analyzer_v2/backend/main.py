@@ -746,21 +746,25 @@ async def process_ultra_fast(log_path: str, config: Dict, database_id: str, file
 
     return total_processed, processing_time, table_name
 
-async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: str, filename: str, customer_id: Optional[str] = None) -> Tuple[int, float, str]:
+async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: str, filename: str, customer_id: Optional[str] = None, crossorter_type: str = 'standard') -> Tuple[int, float, str]:
     """Procesamiento SCNET con debug temporal"""
     start_time = time.time()
-    
+
     # Construir esquema
     schema = SCNETSchemaOptimized(xml_path)
     if not schema.message_id_to_field_positions:
         raise HTTPException(400, "No valid ParcelDataReport found in XML")
 
     # Crossorter XXL: columna FSC extra tras timestamp → offset de 1
-    if customer_id:
+    # El selector de UI tiene prioridad; el config del cliente es fallback
+    if crossorter_type == 'xxl':
+        schema.col_offset = 1
+        logger.info(f"Crossorter XXL mode (UI) for customer {customer_id}")
+    elif customer_id:
         cfg = get_customer_config(customer_id)
         if cfg and cfg.get('crossorter_xxl'):
             schema.col_offset = 1
-            logger.info(f"Crossorter XXL mode enabled for customer {customer_id}")
+            logger.info(f"Crossorter XXL mode (config) for customer {customer_id}")
     
     # Crear tabla
     table_number = extract_table_number(filename)
@@ -912,7 +916,12 @@ async def root():
 @app.get("/customers")
 async def list_customers():
     return [
-        {"id": cfg["id"], "name": cfg["name"], "charts": cfg.get("charts", [])}
+        {
+            "id": cfg["id"],
+            "name": cfg["name"],
+            "charts": cfg.get("charts", []),
+            "crossorter_type": "xxl" if cfg.get("crossorter_xxl") else "standard"
+        }
         for cfg in CUSTOMER_CONFIGS.values()
     ]
 
@@ -921,7 +930,8 @@ async def upload_files(
     log_file: UploadFile = File(...),
     config_file: UploadFile = File(...),
     server_type: str = Query("eDS"),
-    customer_id: Optional[str] = Query(None)
+    customer_id: Optional[str] = Query(None),
+    crossorter_type: str = Query("standard")
 ):
     start_time = time.time()
     
@@ -975,7 +985,7 @@ async def upload_files(
 
             # Procesar con SCNET (XML + FSC)
             records_processed, processing_time, table_name = await process_scnet_ultra_fast(
-                log_path, config_path, database_id, log_file.filename, customer_id
+                log_path, config_path, database_id, log_file.filename, customer_id, crossorter_type
             )
             
             message = f"SCNET: {records_processed:,} records processed -> {table_name}"

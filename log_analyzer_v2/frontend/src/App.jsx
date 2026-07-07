@@ -359,10 +359,17 @@ function CustomerCombobox({ value, onChange, customers }) {
 function UploadTab({ onUploadSuccess, uploadStatus, customers }) {
   const [serverType, setServerType] = useState('eDS');
   const [customerId, setCustomerId] = useState('');
+  const [crossorterType, setCrossorterType] = useState('standard');
   const [logFile, setLogFile] = useState(null);
   const [configFile, setConfigFile] = useState(null);
   const logInputRef = React.useRef();
   const configInputRef = React.useRef();
+
+  // Auto-seleccionar crossorter type al cambiar de cliente
+  useEffect(() => {
+    const customer = customers.find(c => c.id === customerId);
+    setCrossorterType(customer?.crossorter_type || 'standard');
+  }, [customerId, customers]);
 
   // Limpiar archivos al cambiar de tecnología
   useEffect(() => {
@@ -420,7 +427,8 @@ function UploadTab({ onUploadSuccess, uploadStatus, customers }) {
     const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
 
     const customerParam = customerId ? `&customer_id=${encodeURIComponent(customerId)}` : '';
-    const response = await fetch(`${API_BASE}/upload?server_type=${serverType}${customerParam}`, {
+    const crossorterParam = `&crossorter_type=${crossorterType}`;
+    const response = await fetch(`${API_BASE}/upload?server_type=${serverType}${customerParam}${crossorterParam}`, {
       method: 'POST',
       body: formData,
       signal: controller.signal
@@ -449,30 +457,58 @@ function UploadTab({ onUploadSuccess, uploadStatus, customers }) {
         <h2 className="text-lg font-medium text-gray-900 mb-6">Upload Log Files</h2>
 
         <form onSubmit={handleUpload} className="space-y-6">
-          {/* Server Type Selection */}
-          <div>
-            <label className="text-base font-medium text-gray-900">Server Type</label>
-            <div className="mt-4 space-x-6">
-              <label className="inline-flex items-center">
-                <input
-                  type="radio"
-                  value="eDS"
-                  checked={serverType === 'eDS'}
-                  onChange={(e) => setServerType(e.target.value)}
-                  className="form-radio h-4 w-4 text-blue-600"
-                />
-                <span className="ml-2 font-semibold">eDS</span>
-              </label>
-              <label className="inline-flex items-center">
-                <input
-                  type="radio"
-                  value="SCNET"
-                  checked={serverType === 'SCNET'}
-                  onChange={(e) => setServerType(e.target.value)}
-                  className="form-radio h-4 w-4 text-blue-600"
-                />
-                <span className="ml-2 font-semibold">SCNET</span>
-              </label>
+          {/* Server Type + Crossorter Type en la misma fila */}
+          <div className="flex gap-10">
+            <div>
+              <label className="text-base font-medium text-gray-900">Server Type</label>
+              <div className="mt-4 space-x-6">
+                <label className="inline-flex items-center">
+                  <input
+                    type="radio"
+                    value="eDS"
+                    checked={serverType === 'eDS'}
+                    onChange={(e) => setServerType(e.target.value)}
+                    className="form-radio h-4 w-4 text-blue-600"
+                  />
+                  <span className="ml-2 font-semibold">eDS</span>
+                </label>
+                <label className="inline-flex items-center">
+                  <input
+                    type="radio"
+                    value="SCNET"
+                    checked={serverType === 'SCNET'}
+                    onChange={(e) => setServerType(e.target.value)}
+                    className="form-radio h-4 w-4 text-blue-600"
+                  />
+                  <span className="ml-2 font-semibold">SCNET</span>
+                </label>
+              </div>
+            </div>
+
+            <div className="border-l border-gray-200 pl-10">
+              <label className="text-base font-medium text-gray-900">Crossorter Type</label>
+              <div className="mt-4 space-x-6">
+                <label className="inline-flex items-center">
+                  <input
+                    type="radio"
+                    value="standard"
+                    checked={crossorterType === 'standard'}
+                    onChange={(e) => setCrossorterType(e.target.value)}
+                    className="form-radio h-4 w-4 text-blue-600"
+                  />
+                  <span className="ml-2 font-semibold">Standard</span>
+                </label>
+                <label className="inline-flex items-center">
+                  <input
+                    type="radio"
+                    value="xxl"
+                    checked={crossorterType === 'xxl'}
+                    onChange={(e) => setCrossorterType(e.target.value)}
+                    className="form-radio h-4 w-4 text-blue-600"
+                  />
+                  <span className="ml-2 font-semibold">XXL</span>
+                </label>
+              </div>
             </div>
           </div>
 
@@ -966,6 +1002,7 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
 
   const [sortMinimized, setSortMinimized] = useState(false);
   const [inductionMinimized, setInductionMinimized] = useState(false);
+  const [hostpicsExpanded, setHostpicsExpanded] = useState(false);
 
   const sortChartData = useMemo(() => {
     if (!sortQuality?.data?.length) return { rows: [], infeeds: [] };
@@ -993,7 +1030,7 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
     return { rows, infeeds };
   }, [sortQuality]);
 
-  useEffect(() => { setFilterChartHour(''); }, [selectedDatabase?.id]);
+  useEffect(() => { setFilterChartHour(''); setHostpicsExpanded(false); }, [selectedDatabase?.id]);
 
   if (!selectedDatabase) {
     return (
@@ -1315,30 +1352,44 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
                   )}
                 </div>
               )}
+
+              {/* Detalle HOSTPICs — colapsado por defecto */}
+              {(badHostpics?.data?.length > 0 || goodHostpics?.data?.length > 0) && (
+                <div className="mt-4 border-t border-gray-100 pt-4">
+                  <button
+                    onClick={() => setHostpicsExpanded(v => !v)}
+                    className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 select-none"
+                  >
+                    <span className="font-bold">{hostpicsExpanded ? '▾' : '▸'}</span>
+                    <span>{hostpicsExpanded ? 'Ocultar detalle HOSTPICs' : 'Ver detalle HOSTPICs'}</span>
+                  </button>
+
+                  {hostpicsExpanded && (
+                    <div className="mt-4 space-y-4">
+                      {badHostpics === null ? (
+                        <div className="bg-white p-6 rounded-lg shadow flex items-center justify-center h-24">
+                          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-red-500"></div>
+                          <span className="ml-3 text-gray-500 text-sm">Cargando HOSTPICs incorrectos...</span>
+                        </div>
+                      ) : badHostpics.data?.length > 0 ? (
+                        <HostpicsTable data={badHostpics.data} total={badHostpics.total} variant="bad" />
+                      ) : null}
+                      {goodHostpics === null ? (
+                        <div className="bg-white p-6 rounded-lg shadow flex items-center justify-center h-24">
+                          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-green-500"></div>
+                          <span className="ml-3 text-gray-500 text-sm">Cargando HOSTPICs correctos...</span>
+                        </div>
+                      ) : goodHostpics.data?.length > 0 ? (
+                        <HostpicsTable data={goodHostpics.data} total={goodHostpics.total} variant="good" />
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
-
-      {/* HOSTPICs incorrectos */}
-      {badHostpics === null ? (
-        <div className="bg-white p-6 rounded-lg shadow flex items-center justify-center h-24">
-          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-red-500"></div>
-          <span className="ml-3 text-gray-500 text-sm">Cargando HOSTPICs incorrectos...</span>
-        </div>
-      ) : badHostpics.data && badHostpics.data.length > 0 ? (
-        <HostpicsTable data={badHostpics.data} total={badHostpics.total} variant="bad" />
-      ) : null}
-
-      {/* HOSTPICs correctos */}
-      {goodHostpics === null ? (
-        <div className="bg-white p-6 rounded-lg shadow flex items-center justify-center h-24">
-          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-green-500"></div>
-          <span className="ml-3 text-gray-500 text-sm">Cargando HOSTPICs correctos...</span>
-        </div>
-      ) : goodHostpics.data && goodHostpics.data.length > 0 ? (
-        <HostpicsTable data={goodHostpics.data} total={goodHostpics.total} variant="good" />
-      ) : null}
 
     </div>
   );
