@@ -1420,7 +1420,7 @@ async def get_scale_quality(database_id: str):
             columns = [r['column_name'] for r in col_rows]
 
         cfg    = get_customer_config(db_info['customer_id'])
-        sq_cfg = cfg.get('scale_quality') if cfg else None
+        sq_cfg = (cfg or {}).get('scale_quality')
         if not sq_cfg:
             return {"data": [], "error": "Scale quality not configured for this customer"}
 
@@ -1439,7 +1439,7 @@ async def get_scale_quality(database_id: str):
         def _is_pre_scale(ep_str: str) -> bool:
             if not pre_scale_eps:
                 return True
-            normalized = re.sub(r'^0+', '', ep_str.strip())
+            normalized = ep_str.strip().lstrip('0')
             return any(normalized == pep or normalized.startswith(pep + '.') for pep in pre_scale_eps)
 
         if not entrypoint_col or not scale_col:
@@ -1532,18 +1532,23 @@ async def get_scale_quality(database_id: str):
 
         otros_rows = _build_rows(otros_by_zone, is_other=True)
         if otros_rows:
+            agg = {'ok': 0, 'noscan': 0, 'unknown': 0, 'total': 0}
+            err_agg: Dict[str, int] = {}
+            for r in otros_rows:
+                agg['ok']      += r['ok']
+                agg['noscan']  += r['noscan']
+                agg['unknown'] += r['unknown']
+                agg['total']   += r['total']
+                for code in error_codes:
+                    err_agg[code] = err_agg.get(code, 0) + r.get(f'err_{code}', 0)
             otros_header = {
-                'infeed':     'Otros (paquetes registrados después de WSO)',
-                'infeed_num': -1,
-                'ok':         sum(r['ok']     for r in otros_rows),
-                'noscan':     sum(r['noscan'] for r in otros_rows),
-                'unknown':    sum(r['unknown'] for r in otros_rows),
-                'total':      sum(r['total']  for r in otros_rows),
-                'ok_pct':     None,
+                'infeed':          'Otros (paquetes registrados después de WSO)',
+                'infeed_num':      -1,
+                'ok_pct':          None,
                 'is_other_header': True,
+                **agg,
+                **{f'err_{c}': v for c, v in err_agg.items()},
             }
-            for code in error_codes:
-                otros_header[f'err_{code}'] = sum(r.get(f'err_{code}', 0) for r in otros_rows)
             result = _build_rows(zone_stats, is_other=False) + [otros_header] + otros_rows
         else:
             result = _build_rows(zone_stats, is_other=False)
