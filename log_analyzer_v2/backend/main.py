@@ -406,6 +406,7 @@ class SCNETSchemaOptimized:
         self.property_to_table_index = {}  # property_name -> índice en tabla
         self.column_count = 0
         self.reference_order = []  # Orden de MessageID 20
+        self.col_offset = 0  # 1 para Crossorter XXL (columna FSC extra tras timestamp)
         self._build_schema_from_xml(xml_path)
     
     def _build_schema_from_xml(self, xml_path: str):
@@ -563,11 +564,11 @@ class SCNETSchemaOptimized:
             return None
 
         parts = line.split('|')
-        if len(parts) < 3:
+        if len(parts) < 3 + self.col_offset:
             return None
 
         try:
-            message_id_clean = _NON_DIGITS_RE.sub('', parts[1])
+            message_id_clean = _NON_DIGITS_RE.sub('', parts[1 + self.col_offset])
             if not message_id_clean:
                 return None
 
@@ -586,8 +587,9 @@ class SCNETSchemaOptimized:
             field_positions = self.message_id_to_field_positions[message_id]
             mapped_count = 0
             for prop_name, log_position in field_positions.items():
-                if prop_name in self.property_to_table_index and log_position < len(parts):
-                    value = parts[log_position].strip()
+                actual_pos = log_position + self.col_offset
+                if prop_name in self.property_to_table_index and actual_pos < len(parts):
+                    value = parts[actual_pos].strip()
                     if value:
                         record[self.property_to_table_index[prop_name]] = value
                         mapped_count += 1
@@ -752,6 +754,13 @@ async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: st
     schema = SCNETSchemaOptimized(xml_path)
     if not schema.message_id_to_field_positions:
         raise HTTPException(400, "No valid ParcelDataReport found in XML")
+
+    # Crossorter XXL: columna FSC extra tras timestamp → offset de 1
+    if customer_id:
+        cfg = get_customer_config(customer_id)
+        if cfg and cfg.get('crossorter_xxl'):
+            schema.col_offset = 1
+            logger.info(f"Crossorter XXL mode enabled for customer {customer_id}")
     
     # Crear tabla
     table_number = extract_table_number(filename)

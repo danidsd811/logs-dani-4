@@ -1,0 +1,37 @@
+{
+  "id": "dhl_parcel_getafe_es",
+  "name": "DHL Parcel Hub Getafe ES",
+  "crossorter_xxl": true,
+  "charts": ["induction_quality", "sort_quality"],
+  "hostpic_column": "hostpic",
+  "entry_point": {
+    "column": "parcelentrancepoint",
+    "column_aliases": ["parcel_entrance_point", "entrancepoint", "entrance_point"],
+    "pattern": "0*50\\.([0-9]{2})\\.",
+    "group": 1
+  },
+  "zones": [
+    {"id": 1,  "name": "INFEED 1",            "codes": ["24","25","26"]},
+    {"id": 2,  "name": "INFEED 2",            "codes": ["27","28","29"]},
+    {"id": 4,  "name": "INFEED 4",            "codes": ["33","34","35"]},
+    {"id": 5,  "name": "INFEED 5",            "codes": ["58","59","60"]},
+    {"id": 6,  "name": "INFEED 6",            "codes": ["61","62","63"]},
+    {"id": 7,  "name": "INFEED 7",            "codes": ["64","65","66"]},
+    {"id": 99, "name": "Loop del Crossorter", "codes": []}
+  ],
+  "default_zone_id": 99,
+  "sort_report": {"message_id": 20},
+  "good_package": {
+    "message_id": 20,
+    "conditions": [
+      {"column": "lastdestination",          "op": "!=", "value": "998"},
+      {"column": "originaldestinationstate", "op": "=",  "value": "1", "optional": true}
+    ]
+  },
+  "bad_package": {
+    "message_id": 21,
+    "conditions": [
+      {"column": "lastdestination", "op": "=", "value": "998"}
+    ]
+  }
+}

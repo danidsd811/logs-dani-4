@@ -36,6 +36,16 @@ function LogAnalyzerApp() {
       .catch(() => {});
   }, []);
 
+  // Refrescar lista de clientes al volver a la pestaña de upload
+  useEffect(() => {
+    if (activeTab === 'upload') {
+      fetch(`${API_BASE}/customers`)
+        .then(r => r.json())
+        .then(data => setCustomers([...data].sort((a, b) => a.name.localeCompare(b.name))))
+        .catch(() => {});
+    }
+  }, [activeTab]);
+
   // CORREGIDO: Función global para refresh desde ViewLogsTab
   useEffect(() => {
     window.refreshDatabases = fetchDatabases;
@@ -250,6 +260,102 @@ function LogAnalyzerApp() {
 }
 
 // Componente de Upload con Temporizador
+function CustomerCombobox({ value, onChange, customers }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const configured = customers.filter(c => c.charts?.length > 0);
+  const others     = customers.filter(c => !c.charts?.length);
+  const filterFn   = (list) => list.filter(c => !search || c.name.toLowerCase().includes(search.toLowerCase()));
+  const filtCfg    = filterFn(configured);
+  const filtOther  = filterFn(others);
+  const selected   = customers.find(c => c.id === value);
+
+  const pick = (id) => { onChange(id); setOpen(false); setSearch(''); };
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        className="mt-1 w-full flex items-center justify-between border border-gray-300 rounded-md shadow-sm py-2 px-3 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 hover:border-gray-400"
+      >
+        <span className="flex items-center gap-2 truncate min-w-0">
+          {selected ? (
+            <>
+              <span className={`flex-shrink-0 ${selected.charts?.length ? 'text-green-500' : 'text-gray-300'}`}>●</span>
+              <span className="truncate">{selected.name}</span>
+            </>
+          ) : (
+            <span className="text-gray-400">— Select customer —</span>
+          )}
+        </span>
+        <svg className="h-4 w-4 text-gray-400 flex-shrink-0 ml-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute z-50 mt-1 w-full bg-white border border-gray-200 rounded-md shadow-lg flex flex-col" style={{ maxHeight: '300px' }}>
+          <div className="p-2 border-b border-gray-100 flex-shrink-0">
+            <input
+              autoFocus
+              type="text"
+              placeholder="Buscar cliente..."
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="w-full px-2 py-1.5 text-sm border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"
+            />
+          </div>
+          <div className="overflow-y-auto">
+            <div onClick={() => pick('')} className="px-3 py-2 text-sm text-gray-400 cursor-pointer hover:bg-gray-50 italic">
+              — Sin selección —
+            </div>
+            {filtCfg.length > 0 && (
+              <>
+                <div className="px-3 py-1 text-xs font-semibold text-green-700 uppercase tracking-wide bg-green-50 border-y border-green-100">
+                  ● Con analytics
+                </div>
+                {filtCfg.map(c => (
+                  <div key={c.id} onClick={() => pick(c.id)}
+                    className={`flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-green-50 ${value === c.id ? 'bg-green-50 font-semibold' : ''}`}>
+                    <span className="text-green-500 flex-shrink-0 text-xs">●</span>
+                    <span className="truncate">{c.name}</span>
+                  </div>
+                ))}
+              </>
+            )}
+            {filtOther.length > 0 && (
+              <>
+                <div className="px-3 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wide bg-gray-50 border-y border-gray-100">
+                  ○ Sin analytics
+                </div>
+                {filtOther.map(c => (
+                  <div key={c.id} onClick={() => pick(c.id)}
+                    className={`flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50 ${value === c.id ? 'bg-gray-100 font-semibold' : ''}`}>
+                    <span className="text-gray-300 flex-shrink-0 text-xs">●</span>
+                    <span className="truncate text-gray-600">{c.name}</span>
+                  </div>
+                ))}
+              </>
+            )}
+            {filtCfg.length === 0 && filtOther.length === 0 && (
+              <div className="px-3 py-6 text-sm text-gray-400 text-center">No se encontraron clientes</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UploadTab({ onUploadSuccess, uploadStatus, customers }) {
   const [serverType, setServerType] = useState('eDS');
   const [customerId, setCustomerId] = useState('');
@@ -374,16 +480,11 @@ function UploadTab({ onUploadSuccess, uploadStatus, customers }) {
           {customers.length > 0 && (
             <div>
               <label className="block text-sm font-medium text-gray-700">Customer</label>
-              <select
+              <CustomerCombobox
                 value={customerId}
-                onChange={e => setCustomerId(e.target.value)}
-                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 text-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-              >
-                <option value="">— Select customer —</option>
-                {customers.map(c => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
-                ))}
-              </select>
+                onChange={setCustomerId}
+                customers={customers}
+              />
             </div>
           )}
 
@@ -1295,64 +1396,62 @@ function HostpicsTable({ data, total, variant }) {
   };
 
   return (
-    <div className="bg-white rounded-lg shadow">
-      {/* Header */}
-      <div className="px-6 py-4 border-b flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h3 className="text-lg font-semibold text-gray-900">{title}</h3>
-          <p className="text-xs text-gray-500 mt-0.5">
-            {subtitle} — {total.toLocaleString()} únicos en total
-            {filtered.length !== total && ` (${filtered.length.toLocaleString()} filtrados)`}
-          </p>
+    <div className="bg-white rounded-lg shadow overflow-hidden">
+      {/* Cabecera siempre visible con botón minimizar */}
+      <div
+        className="flex items-center justify-between px-6 py-4 cursor-pointer select-none hover:bg-gray-50"
+        onClick={() => setCollapsed(c => !c)}
+      >
+        <div className="flex items-center gap-3">
+          <h3 className="text-lg font-medium text-gray-900">{title}</h3>
+          <span className={`px-2 py-0.5 text-sm font-semibold rounded ${isBad ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+            {total.toLocaleString()} únicos
+          </span>
+          <span className="text-xs text-gray-400">{subtitle}</span>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          {!collapsed && (
-            <>
-              <input
-                type="text"
-                placeholder="Buscar HOSTPIC..."
-                value={search}
-                onChange={e => handleSearch(e.target.value)}
-                className={`border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 ${accentRing} w-48`}
-              />
-              <select
-                value={filterInfeed}
-                onChange={e => handleInfeed(e.target.value)}
-                className={`border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 ${accentRing}`}
-              >
-                <option value="">Todos los infeeds</option>
-                {infeeds.map(inf => <option key={inf} value={inf}>{inf}</option>)}
-              </select>
-              <select
-                value={filterEntryPoint}
-                onChange={e => handleEntryPoint(e.target.value)}
-                className={`border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 ${accentRing} font-mono`}
-              >
-                <option value="">Todos los entry points</option>
-                {entryPoints.map(ep => <option key={ep} value={ep}>{ep}</option>)}
-              </select>
-              <button
-                onClick={copyAll}
-                className={`px-3 py-1.5 text-sm border rounded font-medium ${copyBtnCls}`}
-                title="Copiar todos los HOSTPICs filtrados al portapapeles"
-              >
-                Copiar lista
-              </button>
-            </>
-          )}
-          {/* Botón minimizar / expandir */}
-          <button
-            onClick={() => setCollapsed(c => !c)}
-            className="ml-1 px-2 py-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded border border-gray-200 text-xs font-mono"
-            title={collapsed ? 'Expandir tabla' : 'Minimizar tabla'}
-          >
-            {collapsed ? '▼ Expandir' : '▲ Minimizar'}
-          </button>
-        </div>
+        <span className="text-gray-400 text-lg font-bold">{collapsed ? '▸' : '▾'}</span>
       </div>
 
+      {/* Cuerpo colapsable */}
       {!collapsed && (
         <>
+          {/* Controles de filtrado */}
+          <div className="px-6 py-3 border-t border-b border-gray-100 flex items-center gap-2 flex-wrap">
+            <input
+              type="text"
+              placeholder="Buscar HOSTPIC..."
+              value={search}
+              onChange={e => handleSearch(e.target.value)}
+              className={`border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 ${accentRing} w-48`}
+            />
+            <select
+              value={filterInfeed}
+              onChange={e => handleInfeed(e.target.value)}
+              className={`border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 ${accentRing}`}
+            >
+              <option value="">Todos los infeeds</option>
+              {infeeds.map(inf => <option key={inf} value={inf}>{inf}</option>)}
+            </select>
+            <select
+              value={filterEntryPoint}
+              onChange={e => handleEntryPoint(e.target.value)}
+              className={`border border-gray-300 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 ${accentRing} font-mono`}
+            >
+              <option value="">Todos los entry points</option>
+              {entryPoints.map(ep => <option key={ep} value={ep}>{ep}</option>)}
+            </select>
+            <button
+              onClick={e => { e.stopPropagation(); copyAll(); }}
+              className={`px-3 py-1.5 text-sm border rounded font-medium ${copyBtnCls}`}
+              title="Copiar todos los HOSTPICs filtrados al portapapeles"
+            >
+              Copiar lista
+            </button>
+            {filtered.length !== total && (
+              <span className="text-xs text-gray-400">{filtered.length.toLocaleString()} filtrados</span>
+            )}
+          </div>
+
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm divide-y divide-gray-200">
               <thead className="bg-gray-50">
