@@ -410,7 +410,6 @@ class SCNETSchemaOptimized:
         self.message_id_to_field_positions = {}  # {msg_id: {field_name: log_position}}
         self.property_to_table_index = {}  # property_name -> índice en tabla
         self.column_count = 0
-        self.reference_order = []  # Orden de MessageID 20 (o mensaje de referencia)
         self.col_offset = 0  # 1 para Crossorter XXL (columna FSC extra tras timestamp)
         self._is_network_config = False  # True si el XML es NetworkConfig.xml (SCNET legado)
         self._build_schema_from_xml(xml_path)
@@ -469,12 +468,11 @@ class SCNETSchemaOptimized:
                     if message_number not in parcel_reports:
                         parcel_reports[message_number] = properties
 
-                    # Capturar MessageID 20 como orden de referencia
+                    # Capturar MessageID 20 como orden de referencia (formato moderno)
                     if message_number == 20:
                         reference_properties_order = properties.copy()
-                        logger.info(f"MessageID 20 found - using as column order reference: {len(properties)} properties")
 
-                logger.info(f"SCNET MessageID {message_number}: {len(properties)} properties")
+                    logger.info(f"SCNET MessageID {message_number}: {len(properties)} properties")
 
             if not parcel_reports:
                 raise HTTPException(400, "No valid message definitions found in XML (checked ParcelDataReport and parceldata elements)")
@@ -509,21 +507,17 @@ class SCNETSchemaOptimized:
             raise HTTPException(500, f"Error processing XML: {e}")
     
     def _create_table_schema_with_reference_order(self, all_properties: set, reference_order: list):
-        """Crear esquema usando el orden del MessageID 20"""
-        # Columnas base
+        """Crear esquema de tabla: columnas en el orden del mensaje de referencia, resto al final."""
         self.columns = [("timestamp", "TIMESTAMP"), ("message_id", "INTEGER")]
-        
-        # Usar orden del MessageID 20 si existe
+
         if reference_order:
             ordered_properties = reference_order.copy()
-            # Agregar propiedades que no estén en MessageID 20 al final
             remaining = sorted(all_properties - set(reference_order))
             ordered_properties.extend(remaining)
-            logger.info(f"Using MessageID 20 order: {len(reference_order)} properties + {len(remaining)} additional")
+            logger.info(f"Column order: {len(reference_order)} reference properties + {len(remaining)} additional")
         else:
-            # Fallback: orden alfabético
             ordered_properties = sorted(all_properties)
-            logger.warning("MessageID 20 not found - using alphabetical order")
+            logger.warning("No reference message found - using alphabetical column order")
         
         # Crear columnas y mapeo
         for i, prop_name in enumerate(ordered_properties):
@@ -813,7 +807,7 @@ async def process_ultra_fast(log_path: str, config: Dict, database_id: str, file
     return total_processed, processing_time, table_name
 
 async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: str, filename: str, customer_id: Optional[str] = None, crossorter_type: str = 'standard') -> Tuple[int, float, str]:
-    """Procesamiento SCNET con debug temporal"""
+    """Procesamiento SCNET — soporta ParcelDataReportConfig.xml y NetworkConfig.xml (SCNET legado)"""
     start_time = time.time()
 
     # Construir esquema
@@ -855,9 +849,8 @@ async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: st
     lines_skipped = 0
     last_log = start_time
 
-    # Diagnóstico: capturar las primeras líneas no vacías y por qué se rechazan
+    # Diagnóstico: capturar las primeras líneas rechazadas y por qué
     diag_samples = []   # [(raw_line, reason)]
-    diag_msg_ids_seen = set()
 
     with open(fsc_path, 'r', encoding='utf-8', errors='ignore', buffering=8*1024*1024) as f:
         for line in f:
@@ -869,7 +862,6 @@ async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: st
             record_array = schema.parse_line_ultra_fast(line)
             if record_array:
                 batch.append(tuple(record_array))
-                diag_msg_ids_seen.add(record_array[1])
                 if len(batch) >= batch_size:
                     inserted = await insert_ultra_fast(pool, table_name, batch, schema.columns)
                     total_processed += inserted
