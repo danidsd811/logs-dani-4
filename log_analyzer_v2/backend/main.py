@@ -116,6 +116,10 @@ def build_condition_sql(conditions: List[Dict], columns: List[str]) -> str:
         parts.append(f"TRIM({col}::text) {op} '{val}'")
     return ' AND '.join(parts) if parts else '1=1'
 
+def _safe_sql_name(name: str) -> str:
+    """Sanitiza un identificador SQL eliminando caracteres no permitidos."""
+    return re.sub(r'[^a-zA-Z0-9_]', '_', name)
+
 # ───────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Log Analyzer - Ultra Optimized", version="4.0.0")
@@ -237,7 +241,7 @@ class UltraSchema:
         
         # Ordenar por DefaultOrder y crear columnas
         for default_order, field_name in sorted(msg_20_fields):
-            safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', field_name.lower())
+            safe_name = _safe_sql_name(field_name.lower())
             self.columns.append((safe_name, "TEXT"))
             # Mapear MessageField -> índice en tabla
             self.message_field_to_table_index[field_name] = len(self.columns) - 1
@@ -384,12 +388,12 @@ class UltraSchema:
     
     def get_create_table_sql(self, table_name: str) -> str:
         """SQL para crear tabla"""
-        safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
-        
+        safe_name = _safe_sql_name(table_name)
+
         column_defs = ["id BIGSERIAL PRIMARY KEY"]
         for col_name, col_type in self.columns:
             column_defs.append(f"{col_name} {col_type}")
-        
+
         return f"""
         CREATE TABLE {safe_name} ({', '.join(column_defs)});
         CREATE INDEX idx_{safe_name}_msgid ON {safe_name}(message_id);
@@ -494,7 +498,7 @@ class SCNETSchemaOptimized:
         
         # Crear columnas y mapeo
         for i, prop_name in enumerate(ordered_properties):
-            safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', prop_name.lower())
+            safe_name = _safe_sql_name(prop_name.lower())
             self.columns.append((safe_name, "TEXT"))
             # Mapear property_name -> índice en tabla
             self.property_to_table_index[prop_name] = i + 2  # +2 por timestamp, message_id
@@ -601,7 +605,7 @@ class SCNETSchemaOptimized:
     
     def get_create_table_sql(self, table_name: str) -> str:
         """SQL para crear tabla SCNET"""
-        safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+        safe_name = _safe_sql_name(table_name)
         
         column_defs = ["id BIGSERIAL PRIMARY KEY"]
         for col_name, col_type in self.columns:
@@ -716,23 +720,9 @@ async def process_ultra_fast(log_path: str, config: Dict, database_id: str, file
     processing_time = time.time() - start_time
     speed = total_processed / processing_time if processing_time > 0 else 0
     
-    # Guardar metadatos - CON VERIFICACIÓN ROBUSTA
+    # Guardar metadatos
     column_names = [col[0] for col in schema.columns]
     async with pool.acquire() as conn:
-        # Asegurar que la tabla databases existe antes de insertar
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS databases (
-                id VARCHAR(100) PRIMARY KEY,
-                name VARCHAR(255) NOT NULL,
-                table_name VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                record_count INTEGER DEFAULT 0,
-                file_size_mb FLOAT DEFAULT 0,
-                columns_info JSONB
-            )
-        """)
-        
-        # Ahora insertar los metadatos
         await conn.execute("""
             INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info, customer_id)
             VALUES ($1, $1, $2, $3, $4, $5, $6)
@@ -825,23 +815,9 @@ async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: st
     skip_rate = (lines_skipped / lines_read) * 100 if lines_read > 0 else 0
     logger.info(f"SCNET Final Stats: {lines_read:,} lines read, {total_processed:,} records, {lines_skipped:,} skipped ({skip_rate:.1f}%)")
     
-    # Guardar metadatos - CON VERIFICACIÓN ROBUSTA
+    # Guardar metadatos
     column_names = [col[0] for col in schema.columns]
     async with pool.acquire() as conn:
-        # Asegurar que la tabla databases existe antes de insertar
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS databases (
-                id VARCHAR(100) PRIMARY KEY,
-                name VARCHAR(255) NOT NULL,
-                table_name VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                record_count INTEGER DEFAULT 0,
-                file_size_mb FLOAT DEFAULT 0,
-                columns_info JSONB
-            )
-        """)
-        
-        # Ahora insertar los metadatos
         await conn.execute("""
             INSERT INTO databases (id, name, table_name, record_count, file_size_mb, columns_info, customer_id)
             VALUES ($1, $1, $2, $3, $4, $5, $6)
@@ -859,8 +835,8 @@ async def insert_ultra_fast(pool, table_name: str, batch: List[tuple], columns: 
     """Inserción ultra-optimizada"""
     if not batch:
         return 0
-    
-    safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+
+    safe_name = _safe_sql_name(table_name)
     column_names = [col[0] for col in columns]
     
     async with pool.acquire() as conn:
@@ -881,10 +857,13 @@ async def insert_ultra_fast(pool, table_name: str, batch: List[tuple], columns: 
 
 async def create_analytics_indexes(pool, table_name: str, column_names: List[str]):
     """Índice compuesto para acelerar DISTINCT ON (hostpic) en queries de Analytics"""
-    safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
-    hostpic_col   = next((c for c in column_names if c.lower() == 'hostpic'), None)
-    lastdest_col  = next((c for c in column_names if 'lastdestination' in c.lower() or c.lower() in ('last_destination', 'lastdestination')), None)
-    entrypoint_col = next((c for c in column_names if c.lower() in ('parcel_entry_point', 'parcelentrypoint', 'entrance_point', 'entrypoint', 'entry_point') or 'parcelentrypoint' in c.lower()), None)
+    safe_table     = _safe_sql_name(table_name)
+    hostpic_col    = find_column(column_names, 'hostpic')
+    lastdest_col   = find_column(column_names, 'lastdestination', 'last_destination')
+    entrypoint_col = find_column(column_names,
+                                 'parcelentrypoint', 'parcelentrancepoint',
+                                 'parcel_entry_point', 'parcel_entrance_point',
+                                 'entrancepoint', 'entrypoint', 'entrance_point', 'entry_point')
 
     if not all([hostpic_col, lastdest_col, entrypoint_col]):
         logger.info(f"Analytics columns not detected for {table_name} — skipping composite index")
@@ -900,6 +879,27 @@ async def create_analytics_indexes(pool, table_name: str, column_names: List[str
             logger.info(f"Analytics index created: {idx_name}")
         except Exception as e:
             logger.warning(f"Could not create analytics index for {table_name}: {e}")
+
+
+async def _get_db_info(conn, database_id: str):
+    """Carga metadatos de la BD, parsea columnas y resuelve el config del cliente.
+    Lanza HTTPException(404) si la BD no existe."""
+    row = await conn.fetchrow(
+        "SELECT table_name, columns_info, customer_id FROM databases WHERE id = $1",
+        database_id
+    )
+    if not row:
+        raise HTTPException(404, "Database not found")
+    table_name = row['table_name']
+    columns = json.loads(row['columns_info'] or '[]')
+    if not columns:
+        col_rows = await conn.fetch(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
+            table_name
+        )
+        columns = [r['column_name'] for r in col_rows]
+    cfg = get_customer_config(row['customer_id'])
+    return table_name, _safe_sql_name(table_name), columns, cfg
 
 
 # API Routes
@@ -1091,7 +1091,7 @@ async def query_logs(database_id: str, query: LogQuery):
 async def get_table_stats(table_name: str):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
+        safe_name = _safe_sql_name(table_name)
         
         exists = await conn.fetchval(
             "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)", 
@@ -1112,23 +1112,7 @@ async def get_table_stats(table_name: str):
 async def get_induction_quality(database_id: str):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        db_info = await conn.fetchrow(
-            "SELECT table_name, columns_info, customer_id FROM databases WHERE id = $1",
-            database_id
-        )
-        if not db_info:
-            raise HTTPException(404, "Database not found")
-
-        table_name = db_info['table_name']
-        columns = json.loads(db_info['columns_info'] or '[]')
-        safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
-        if not columns:
-            col_rows = await conn.fetch(
-                "SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
-                table_name
-            )
-            columns = [r['column_name'] for r in col_rows]
-        cfg = get_customer_config(db_info['customer_id'])
+        table_name, safe_table, columns, cfg = await _get_db_info(conn, database_id)
         if not cfg or not cfg.get('good_package') or not cfg.get('bad_package'):
             return {"data": [], "error": "Analytics not configured for this customer"}
 
@@ -1211,23 +1195,7 @@ async def get_induction_quality(database_id: str):
 async def get_bad_hostpics(database_id: str):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        db_info = await conn.fetchrow(
-            "SELECT table_name, columns_info, customer_id FROM databases WHERE id = $1",
-            database_id
-        )
-        if not db_info:
-            raise HTTPException(404, "Database not found")
-
-        table_name = db_info['table_name']
-        columns = json.loads(db_info['columns_info'] or '[]')
-        safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
-        if not columns:
-            col_rows = await conn.fetch(
-                "SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
-                table_name
-            )
-            columns = [r['column_name'] for r in col_rows]
-        cfg = get_customer_config(db_info['customer_id'])
+        table_name, safe_table, columns, cfg = await _get_db_info(conn, database_id)
         if not cfg or not cfg.get('good_package') or not cfg.get('bad_package'):
             return {"data": [], "total": 0}
 
@@ -1271,23 +1239,7 @@ async def get_bad_hostpics(database_id: str):
 async def get_good_hostpics(database_id: str):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        db_info = await conn.fetchrow(
-            "SELECT table_name, columns_info, customer_id FROM databases WHERE id = $1",
-            database_id
-        )
-        if not db_info:
-            raise HTTPException(404, "Database not found")
-
-        table_name = db_info['table_name']
-        columns = json.loads(db_info['columns_info'] or '[]')
-        safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
-        if not columns:
-            col_rows = await conn.fetch(
-                "SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
-                table_name
-            )
-            columns = [r['column_name'] for r in col_rows]
-        cfg = get_customer_config(db_info['customer_id'])
+        table_name, safe_table, columns, cfg = await _get_db_info(conn, database_id)
         if not cfg or not cfg.get('good_package') or not cfg.get('bad_package'):
             return {"data": [], "total": 0}
 
@@ -1331,24 +1283,7 @@ async def get_good_hostpics(database_id: str):
 async def get_sort_quality(database_id: str):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        db_info = await conn.fetchrow(
-            "SELECT table_name, columns_info, customer_id FROM databases WHERE id = $1",
-            database_id
-        )
-        if not db_info:
-            raise HTTPException(404, "Database not found")
-
-        table_name = db_info['table_name']
-        columns    = json.loads(db_info['columns_info'] or '[]')
-        safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
-        if not columns:
-            col_rows = await conn.fetch(
-                "SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
-                table_name
-            )
-            columns = [r['column_name'] for r in col_rows]
-
-        cfg = get_customer_config(db_info['customer_id'])
+        table_name, safe_table, columns, cfg = await _get_db_info(conn, database_id)
         if not cfg or 'sort_report' not in cfg or 'sort_quality' not in cfg.get('charts', []):
             return {"data": [], "error": "Sort quality not configured for this customer"}
 
@@ -1402,24 +1337,7 @@ async def get_sort_quality(database_id: str):
 async def get_scale_quality(database_id: str):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        db_info = await conn.fetchrow(
-            "SELECT table_name, columns_info, customer_id FROM databases WHERE id = $1",
-            database_id
-        )
-        if not db_info:
-            raise HTTPException(404, "Database not found")
-
-        table_name = db_info['table_name']
-        columns    = json.loads(db_info['columns_info'] or '[]')
-        safe_table = re.sub(r'[^a-zA-Z0-9_]', '_', table_name)
-        if not columns:
-            col_rows = await conn.fetch(
-                "SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position",
-                table_name
-            )
-            columns = [r['column_name'] for r in col_rows]
-
-        cfg    = get_customer_config(db_info['customer_id'])
+        table_name, safe_table, columns, cfg = await _get_db_info(conn, database_id)
         sq_cfg = (cfg or {}).get('scale_quality')
         if not sq_cfg:
             return {"data": [], "error": "Scale quality not configured for this customer"}

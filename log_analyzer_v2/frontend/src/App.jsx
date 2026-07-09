@@ -634,16 +634,11 @@ function ViewLogsTab({
 }) {
   const [refreshing, setRefreshing] = useState(false);
 
-  // Función para refrescar databases - CORREGIDA para evitar duplicados
   const handleRefreshDatabases = async () => {
     setRefreshing(true);
     try {
-      const response = await fetch(`${API_BASE}/databases`);
-      const data = await response.json();
-      
-      // Llamar directamente a fetchDatabases del componente padre para evitar duplicados
       if (window.refreshDatabases) {
-        window.refreshDatabases();
+        await window.refreshDatabases();
       }
     } catch (error) {
       console.error('Error refreshing databases:', error);
@@ -1038,6 +1033,14 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
     return { totalOk, pctBase, totalErr: pctBase - totalOk, pct };
   }, [scalePreRows, scaleQuality]);
 
+  const sortKpis = useMemo(() => {
+    if (!sortQuality?.data?.length) return null;
+    const totalOk  = sortQuality.data.filter(r => r.state === '1').reduce((s, r) => s + r.count, 0);
+    const totalAll = sortQuality.data.reduce((s, r) => s + r.count, 0);
+    const pct      = totalAll > 0 ? ((totalOk / totalAll) * 100).toFixed(1) : null;
+    return { totalOk, totalAll, pct };
+  }, [sortQuality]);
+
   const sortChartData = useMemo(() => {
     if (!sortQuality?.data?.length) return { rows: [], infeeds: [] };
     const data = sortQuality.data;
@@ -1133,16 +1136,11 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
                   {sortQuality.customer}
                 </span>
               )}
-              {sortQuality.data?.length > 0 && (() => {
-                const totalOk  = sortQuality.data.filter(r => r.state === '1').reduce((s, r) => s + r.count, 0);
-                const totalAll = sortQuality.data.reduce((s, r) => s + r.count, 0);
-                const pct      = totalAll > 0 ? ((totalOk / totalAll) * 100).toFixed(1) : null;
-                return pct !== null && (
-                  <span className={`text-sm font-semibold px-2 py-0.5 rounded ${parseFloat(pct) >= 90 ? 'bg-green-100 text-green-700' : parseFloat(pct) >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
-                    {pct}% clasificados
-                  </span>
-                );
-              })()}
+              {sortKpis?.pct && (
+                <span className={`text-sm font-semibold px-2 py-0.5 rounded ${parseFloat(sortKpis.pct) >= 90 ? 'bg-green-100 text-green-700' : parseFloat(sortKpis.pct) >= 70 ? 'bg-yellow-100 text-yellow-700' : 'bg-red-100 text-red-700'}`}>
+                  {sortKpis.pct}% clasificados
+                </span>
+              )}
             </div>
             <span className="text-gray-400 text-lg font-bold">{sortMinimized ? '▸' : '▾'}</span>
           </div>
@@ -1153,31 +1151,24 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, loading, ind
               <p className="text-sm text-gray-500 mb-4">
                 Paquetes únicos (HOSTPIC × ODS) agrupados por estado · cada color = punto de entrada
               </p>
-              {sortQuality.data?.length > 0 ? (
+              {sortKpis ? (
                 <>
-                  {(() => {
-                    const totalOk  = sortQuality.data.filter(r => r.state === '1').reduce((s, r) => s + r.count, 0);
-                    const totalAll = sortQuality.data.reduce((s, r) => s + r.count, 0);
-                    const pct      = totalAll > 0 ? ((totalOk / totalAll) * 100).toFixed(1) : null;
-                    return (
-                      <div className="grid grid-cols-3 gap-4 mb-6">
-                        <div className="bg-green-50 border border-green-200 p-4 rounded-lg">
-                          <p className="text-xs font-medium text-gray-500 uppercase">Clasificados (ODS=1)</p>
-                          <p className="text-2xl font-bold text-green-700 mt-1">{totalOk.toLocaleString()}</p>
-                        </div>
-                        <div className="bg-red-50 border border-red-200 p-4 rounded-lg">
-                          <p className="text-xs font-medium text-gray-500 uppercase">Otros estados</p>
-                          <p className="text-2xl font-bold text-red-700 mt-1">{(totalAll - totalOk).toLocaleString()}</p>
-                        </div>
-                        <div className="bg-blue-50 border border-blue-200 p-4 rounded-lg">
-                          <p className="text-xs font-medium text-gray-500 uppercase">% Clasificados</p>
-                          <p className={`text-2xl font-bold mt-1 ${parseFloat(pct) >= 90 ? 'text-green-700' : parseFloat(pct) >= 70 ? 'text-yellow-600' : 'text-red-700'}`}>
-                            {pct !== null ? `${pct}%` : 'N/A'}
-                          </p>
-                        </div>
-                      </div>
-                    );
-                  })()}
+                  <div className="grid grid-cols-3 gap-4 mb-6">
+                    <div className="bg-green-50 border border-green-200 p-4 rounded-lg">
+                      <p className="text-xs font-medium text-gray-500 uppercase">Clasificados (ODS=1)</p>
+                      <p className="text-2xl font-bold text-green-700 mt-1">{sortKpis.totalOk.toLocaleString()}</p>
+                    </div>
+                    <div className="bg-red-50 border border-red-200 p-4 rounded-lg">
+                      <p className="text-xs font-medium text-gray-500 uppercase">Otros estados</p>
+                      <p className="text-2xl font-bold text-red-700 mt-1">{(sortKpis.totalAll - sortKpis.totalOk).toLocaleString()}</p>
+                    </div>
+                    <div className="bg-blue-50 border border-blue-200 p-4 rounded-lg">
+                      <p className="text-xs font-medium text-gray-500 uppercase">% Clasificados</p>
+                      <p className={`text-2xl font-bold mt-1 ${parseFloat(sortKpis.pct) >= 90 ? 'text-green-700' : parseFloat(sortKpis.pct) >= 70 ? 'text-yellow-600' : 'text-red-700'}`}>
+                        {sortKpis.pct !== null ? `${sortKpis.pct}%` : 'N/A'}
+                      </p>
+                    </div>
+                  </div>
 
                   <ResponsiveContainer width="100%" height={320}>
                     <BarChart data={sortChartData.rows} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
