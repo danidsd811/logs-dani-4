@@ -190,6 +190,7 @@ class ProcessResponse(BaseModel):
     records_processed: int
     database_id: str
     table_name: str
+    debug_info: Optional[str] = None
 
 class LogQuery(BaseModel):
     page: int = 1
@@ -409,28 +410,40 @@ class SCNETSchemaOptimized:
         self.message_id_to_field_positions = {}  # {msg_id: {field_name: log_position}}
         self.property_to_table_index = {}  # property_name -> índice en tabla
         self.column_count = 0
-        self.reference_order = []  # Orden de MessageID 20
+        self.reference_order = []  # Orden de MessageID 20 (o mensaje de referencia)
         self.col_offset = 0  # 1 para Crossorter XXL (columna FSC extra tras timestamp)
+        self._is_network_config = False  # True si el XML es NetworkConfig.xml (SCNET legado)
         self._build_schema_from_xml(xml_path)
     
     def _build_schema_from_xml(self, xml_path: str):
-        """Construir esquema con orden del MessageID 20"""
+        """Construir esquema soportando ParcelDataReportConfig.xml y NetworkConfig.xml (SCNET legado)"""
         try:
             tree = ET.parse(xml_path)
             root = tree.getroot()
-            
+
+            # Detectar formato:
+            # - ParcelDataReportConfig.xml → <ParcelDataReport id="20">
+            # - NetworkConfig.xml (legado) → <parceldata reportid="DivertSuccessSortReport"> <text>56</text>
+            report_elements = root.findall('.//ParcelDataReport')
+            if not report_elements:
+                report_elements = root.findall('.//parceldata')
+                if report_elements:
+                    self._is_network_config = True
+                    logger.info("Detected NetworkConfig.xml format (legacy SCNET)")
+
             # PASO 1: Extraer TODOS los MessageIDs y sus propiedades
             parcel_reports = {}
             all_properties = set()
-            reference_properties_order = []  # Para MessageID 20
-            
-            for report in root.findall('.//ParcelDataReport'):
-                report_id = report.get('id', '')
-                
+            reference_properties_order = []  # Para MessageID 20 (o el más rico disponible)
+
+            for report in report_elements:
+                # ParcelDataReportConfig usa 'id'; NetworkConfig usa 'reportid'
+                report_id = report.get('id') or report.get('reportid') or ''
+
                 # Determinar MessageID real
                 message_number = None
                 text_element = report.find('text')
-                
+
                 if text_element is not None and text_element.text:
                     try:
                         message_number = int(text_element.text.strip())
@@ -441,35 +454,51 @@ class SCNETSchemaOptimized:
                         message_number = int(report_id)
                     except ValueError:
                         continue
-                
-                # Extraer propiedades EN ORDEN
+
+                # Extraer propiedades EN ORDEN (búsqueda recursiva para capturar sub-elementos)
                 properties = []
-                for prop in report.findall('property'):
+                for prop in report.findall('.//property'):
                     prop_text = prop.text
                     if prop_text:
                         prop_name = prop_text.strip()
                         properties.append(prop_name)
                         all_properties.add(prop_name)
-                
+
                 if properties and message_number is not None:
-                    parcel_reports[message_number] = properties
-                    
-                    # CAPTURAR ORDEN DEL MessageID 20 como referencia
+                    # Si el mensaje aparece en varias secciones, conservar la primera definición
+                    if message_number not in parcel_reports:
+                        parcel_reports[message_number] = properties
+
+                    # Capturar MessageID 20 como orden de referencia
                     if message_number == 20:
                         reference_properties_order = properties.copy()
                         logger.info(f"MessageID 20 found - using as column order reference: {len(properties)} properties")
-                
+
                 logger.info(f"SCNET MessageID {message_number}: {len(properties)} properties")
-            
+
             if not parcel_reports:
-                raise HTTPException(400, "No valid ParcelDataReport found in XML")
-            
-            # PASO 2: Crear esquema de tabla usando ORDEN del MessageID 20
+                raise HTTPException(400, "No valid message definitions found in XML (checked ParcelDataReport and parceldata elements)")
+
+            # Si no hay MessageID 20 (e.g. NetworkConfig.xml), usar el sort report principal como referencia.
+            # Orden de preferencia: 56 (DivertSuccessSortReport), 58 (SortReport), 81 (AlibiLog),
+            # 57 (DivertSortReport); fallback al mensaje con más propiedades.
+            if not reference_properties_order and parcel_reports:
+                for preferred_id in [56, 58, 81, 57]:
+                    if preferred_id in parcel_reports:
+                        reference_properties_order = parcel_reports[preferred_id].copy()
+                        logger.info(f"No MessageID 20 — using MessageID {preferred_id} (sort report) as column order reference ({len(reference_properties_order)} properties)")
+                        break
+                if not reference_properties_order:
+                    ref_id, ref_props = max(parcel_reports.items(), key=lambda x: len(x[1]))
+                    reference_properties_order = ref_props.copy()
+                    logger.info(f"No MessageID 20 — using MessageID {ref_id} (richest) as column order reference ({len(ref_props)} properties)")
+
+            # PASO 2: Crear esquema de tabla usando ORDEN del mensaje de referencia
             self._create_table_schema_with_reference_order(all_properties, reference_properties_order)
-            
+
             # PASO 3: Crear mapeos para cada mensaje
             self._create_message_mappings(parcel_reports)
-            
+
             logger.info(f"SCNET Schema built: {self.column_count} columns, {len(self.message_id_to_field_positions)} MessageIDs")
             
         except ET.ParseError as e:
@@ -508,58 +537,89 @@ class SCNETSchemaOptimized:
     
     def _create_message_mappings(self, parcel_reports: dict):
         """Crear mapeos de posición para cada MessageID - LÓGICA SIMPLIFICADA"""
-        
-        # MessageIDs que no tienen <text> en el XML - leen PIC directamente de posición 2
-        no_text_message_ids = {11, 13, 31}
-        
+
+        # En NetworkConfig.xml (legado) el message_id va en parts[0] tras la coma:
+        #   "timestamp,MSG_ID|campo1|campo2|..." → campos empiezan en parts[1] (offset=1)
+        # En ParcelDataReportConfig.xml (moderno):
+        #   "timestamp|MSG_ID|campo1|..." → campos empiezan en parts[2] (offset=2)
+        # Mensajes especiales 11, 13, 31 del formato moderno tienen PIC fuera de los campos XML.
+        no_text_message_ids = set() if self._is_network_config else {11, 13, 31}
+        field_offset = 1 if self._is_network_config else 2
+
         for message_number, properties in parcel_reports.items():
             field_positions = {}
-            
+
             if message_number in no_text_message_ids:
-                # LÓGICA SIMPLE: MessageIDs sin <text>
-                # Posición 2: PIC (leído directamente del archivo)
+                # Mensajes sin <text> (solo formato moderno): PIC en pos 2, propiedades desde pos 3
                 field_positions['pic'] = 2
-                
-                # Posición 3+: Las propiedades definidas en XML
                 for i, prop_name in enumerate(properties):
                     field_positions[prop_name] = i + 3
-                
                 logger.info(f"MessageID {message_number} (sin <text>): PIC directo pos 2 + {len(properties)} properties del XML")
-                
+
             else:
-                # REGLA NORMAL: MessageIDs con <text>
-                # Posición 2+: Las propiedades definidas en XML
+                # Regla normal: propiedades en orden desde field_offset
                 for log_position, prop_name in enumerate(properties):
-                    field_positions[prop_name] = log_position + 2
-                
-                logger.info(f"MessageID {message_number} (con <text>): {len(properties)} properties normales")
+                    field_positions[prop_name] = log_position + field_offset
+                logger.info(f"MessageID {message_number} (con <text>): {len(properties)} properties @ offset {field_offset}")
             
             if field_positions:
                 self.message_id_to_field_positions[message_number] = field_positions
         
         logger.info(f"Message mappings created for {len(self.message_id_to_field_positions)} MessageIDs")
+
+        # En NetworkConfig.xml el mensaje 51 (HostpicResponse) raramente se define.
+        # En los logs FSC siempre tiene: parts[1]=PIC, parts[2]=HOSTPIC.
+        # Forzamos este mapeo independientemente de lo que diga (o no diga) el XML.
+        if self._is_network_config:
+            self.message_id_to_field_positions[51] = {'pic': 1, 'hostpic': 2}
+            logger.info("NetworkConfig: mensaje 51 hardcoded → pic@parts[1], hostpic@parts[2]")
     
     def parse_timestamp_fast(self, ts_str: str) -> Optional[datetime]:
-        """Parse timestamp formato SCNET: DD/MM/YYYY HH:MM:SS:mmm"""
+        """Parse timestamp SCNET en cualquiera de sus variantes:
+          DD/MM/YYYY HH:MM:SS:mmm        (dos puntos para ms — SCNET moderno)
+          DD/MM/YYYY HH:MM:SS:mmm,µµµ   (ms + microsegundos con coma — SCNET legado)
+          DD/MM/YYYY HH:MM:SS.mmm        (punto para ms)
+          DD/MM/YYYY HH:MM:SS            (sin milisegundos)
+        """
         try:
-            # Formato: 07/05/2025 00:00:00:659
-            if ':' in ts_str and len(ts_str.split(':')) >= 4:
-                date_part, time_part = ts_str.split(' ', 1)
-                day, month, year = date_part.split('/')
-                time_parts = time_part.split(':')
-                if len(time_parts) >= 4:
-                    hour, minute, second, millisecond = time_parts[0], time_parts[1], time_parts[2], time_parts[3]
-                    return datetime(
-                        int(year), int(month), int(day),
-                        int(hour), int(minute), int(second),
-                        int(millisecond) * 1000
-                    )
+            space_idx = ts_str.find(' ')
+            if space_idx < 0:
+                return None
+            date_part = ts_str[:space_idx]
+            time_part = ts_str[space_idx + 1:]
+
+            day, month, year = date_part.split('/')
+
+            if '.' in time_part:
+                # HH:MM:SS.mmm
+                t, ms_str = time_part.rsplit('.', 1)
+                hour, minute, second = t.split(':')
+                ms = int(ms_str.split(',')[0])  # ignorar microsegundos tras coma
+            else:
+                # HH:MM:SS:mmm[,µµµ]  o  HH:MM:SS
+                tp = time_part.split(':')
+                hour, minute, second = tp[0], tp[1], tp[2]
+                ms_raw = tp[3] if len(tp) >= 4 else '0'
+                ms = int(ms_raw.split(',')[0])  # ignorar microsegundos tras coma
+
+            return datetime(
+                int(year), int(month), int(day),
+                int(hour), int(minute), int(second),
+                ms * 1000
+            )
         except (ValueError, IndexError):
             pass
         return None
     
     def parse_line_ultra_fast(self, line: str) -> Optional[List]:
-        """Parse línea FSC con limpieza robusta de caracteres de control"""
+        """Parse línea FSC — soporta formato moderno y NetworkConfig (SCNET legado).
+
+        Formato moderno (ParcelDataReportConfig):
+            timestamp|MSG_ID|campo1|campo2|...
+        Formato legado (NetworkConfig):
+            timestamp,STX+MSG_ID|campo1|campo2|...|[checksum]
+            Tras strip de STX: timestamp,MSG_ID|campo1|campo2|...
+        """
         if not line.strip():
             return None
 
@@ -568,15 +628,29 @@ class SCNETSchemaOptimized:
             return None
 
         parts = line.split('|')
-        if len(parts) < 3 + self.col_offset:
-            return None
 
         try:
-            message_id_clean = _NON_DIGITS_RE.sub('', parts[1 + self.col_offset])
+            if self._is_network_config:
+                # En el formato legado parts[0] = "timestamp,MSG_ID"
+                if len(parts) < 2:
+                    return None
+                comma_idx = parts[0].rfind(',')
+                if comma_idx < 0:
+                    return None
+                ts_str = parts[0][:comma_idx].strip()
+                mid_str = parts[0][comma_idx + 1:].strip()
+            else:
+                # Formato moderno: parts[0]=timestamp, parts[1+offset]=MSG_ID
+                if len(parts) < 3 + self.col_offset:
+                    return None
+                ts_str = parts[0].strip()
+                mid_str = parts[1 + self.col_offset]
+
+            message_id_clean = _NON_DIGITS_RE.sub('', mid_str)
             if not message_id_clean:
                 return None
 
-            timestamp = self.parse_timestamp_fast(parts[0].strip())
+            timestamp = self.parse_timestamp_fast(ts_str)
             if not timestamp:
                 return None
 
@@ -591,7 +665,9 @@ class SCNETSchemaOptimized:
             field_positions = self.message_id_to_field_positions[message_id]
             mapped_count = 0
             for prop_name, log_position in field_positions.items():
-                actual_pos = log_position + self.col_offset
+                # NetworkConfig: log_position ya es el índice directo en parts (sin col_offset)
+                # Moderno:       log_position + col_offset (para Crossorter XXL)
+                actual_pos = log_position if self._is_network_config else log_position + self.col_offset
                 if prop_name in self.property_to_table_index and actual_pos < len(parts):
                     value = parts[actual_pos].strip()
                     if value:
@@ -771,49 +847,106 @@ async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: st
     logger.info(f"Available MessageIDs: {sorted(schema.message_id_to_field_positions.keys())}")
     logger.info(f"Table will have {schema.column_count} columns")
     
-    # Procesamiento con contadores de debug
+    # Procesamiento
     batch = []
     batch_size = 50000
     total_processed = 0
     lines_read = 0
     lines_skipped = 0
     last_log = start_time
-    
+
+    # Diagnóstico: capturar las primeras líneas no vacías y por qué se rechazan
+    diag_samples = []   # [(raw_line, reason)]
+    diag_msg_ids_seen = set()
+
     with open(fsc_path, 'r', encoding='utf-8', errors='ignore', buffering=8*1024*1024) as f:
         for line in f:
             lines_read += 1
 
             # Limpieza robusta de caracteres problemáticos
             line = line.replace('\x00', '').replace('\r', '').strip()
-            
+
             record_array = schema.parse_line_ultra_fast(line)
             if record_array:
                 batch.append(tuple(record_array))
+                diag_msg_ids_seen.add(record_array[1])
                 if len(batch) >= batch_size:
                     inserted = await insert_ultra_fast(pool, table_name, batch, schema.columns)
                     total_processed += inserted
                     batch = []
-                    
-                    # Log progreso
-                    if time.time() - last_log > 5:  # Más frecuente para debug
+                    if time.time() - last_log > 5:
                         rate = total_processed / (time.time() - start_time)
                         skip_rate = (lines_skipped / lines_read) * 100 if lines_read > 0 else 0
-                        logger.info(f"SCNET Progress: {lines_read:,} lines read, {total_processed:,} records processed ({rate:,.0f}/sec, {skip_rate:.1f}% skipped)")
+                        logger.info(f"SCNET Progress: {lines_read:,} lines read, {total_processed:,} records ({rate:,.0f}/sec, {skip_rate:.1f}% skipped)")
                         last_log = time.time()
             else:
                 lines_skipped += 1
-    
+                # Guardar muestra de las primeras líneas rechazadas para diagnóstico
+                if line and len(diag_samples) < 5:
+                    parts = line.split('|')
+                    if schema._is_network_config:
+                        # Formato legado: parts[0] = "timestamp,MSG_ID"
+                        if len(parts) < 2:
+                            reason = f"muy_pocas_columnas({len(parts)})"
+                        else:
+                            comma_idx = parts[0].rfind(',')
+                            if comma_idx < 0:
+                                reason = "sin_coma_en_campo0_formato_invalido"
+                            else:
+                                ts_str = parts[0][:comma_idx].strip()
+                                mid_str = parts[0][comma_idx + 1:].strip()
+                                ts_ok = schema.parse_timestamp_fast(ts_str) is not None
+                                if not ts_ok:
+                                    reason = f"timestamp_invalido('{ts_str[:40]}')"
+                                else:
+                                    mid_clean = _NON_DIGITS_RE.sub('', mid_str)
+                                    try:
+                                        mid = int(mid_clean)
+                                        if mid not in schema.message_id_to_field_positions:
+                                            reason = f"message_id_{mid}_no_en_XML(disponibles:{sorted(schema.message_id_to_field_positions.keys())})"
+                                        else:
+                                            reason = "sin_campos_mapeados"
+                                    except ValueError:
+                                        reason = f"message_id_no_numerico('{mid_str[:20]}')"
+                    else:
+                        # Formato moderno: parts[0]=timestamp, parts[1+offset]=MSG_ID
+                        if len(parts) < 3 + schema.col_offset:
+                            reason = f"muy_pocas_columnas({len(parts)})"
+                        else:
+                            ts_ok = schema.parse_timestamp_fast(parts[0].strip()) is not None
+                            if not ts_ok:
+                                reason = f"timestamp_invalido('{parts[0].strip()[:40]}')"
+                            else:
+                                mid_raw = parts[1 + schema.col_offset].strip()
+                                mid_clean = _NON_DIGITS_RE.sub('', mid_raw)
+                                try:
+                                    mid = int(mid_clean)
+                                    if mid not in schema.message_id_to_field_positions:
+                                        reason = f"message_id_{mid}_no_en_XML(disponibles:{sorted(schema.message_id_to_field_positions.keys())[:8]})"
+                                    else:
+                                        reason = "sin_campos_mapeados"
+                                except ValueError:
+                                    reason = f"message_id_no_numerico('{mid_raw[:20]}')"
+                    diag_samples.append((line[:120], reason))
+
     # Último batch
     if batch:
         inserted = await insert_ultra_fast(pool, table_name, batch, schema.columns)
         total_processed += inserted
-    
+
     processing_time = time.time() - start_time
     speed = total_processed / processing_time if processing_time > 0 else 0
-    
+
     # Stats finales
     skip_rate = (lines_skipped / lines_read) * 100 if lines_read > 0 else 0
     logger.info(f"SCNET Final Stats: {lines_read:,} lines read, {total_processed:,} records, {lines_skipped:,} skipped ({skip_rate:.1f}%)")
+
+    # Construir debug_info si hay problemas
+    debug_info = None
+    if total_processed == 0 and diag_samples:
+        lines_diag = [f"• [{r}]  {l}" for l, r in diag_samples]
+        debug_info = f"0 registros procesados de {lines_read:,} líneas leídas. Primeras líneas rechazadas:\n" + "\n".join(lines_diag)
+        logger.warning(f"SCNET DIAGNÓSTICO:\n{debug_info}")
     
     # Guardar metadatos
     column_names = [col[0] for col in schema.columns]
@@ -829,7 +962,7 @@ async def process_scnet_ultra_fast(fsc_path: str, xml_path: str, database_id: st
 
     logger.info(f"SCNET COMPLETE: {total_processed:,} records in {processing_time:.2f}s ({speed:,.0f} rec/sec)")
 
-    return total_processed, processing_time, table_name
+    return total_processed, processing_time, table_name, debug_info
 
 async def insert_ultra_fast(pool, table_name: str, batch: List[tuple], columns: List[tuple]) -> int:
     """Inserción ultra-optimizada"""
@@ -977,6 +1110,7 @@ async def upload_files(
             records_processed, processing_time, table_name = await process_ultra_fast(
                 log_path, config, database_id, log_file.filename, customer_id
             )
+            debug_info = None
 
             message = f"eDS: {records_processed:,} records processed -> {table_name}"
 
@@ -984,24 +1118,25 @@ async def upload_files(
             logger.info(f"Processing SCNET files: {log_file.filename} + {config_file.filename}")
 
             # Procesar con SCNET (XML + FSC)
-            records_processed, processing_time, table_name = await process_scnet_ultra_fast(
+            records_processed, processing_time, table_name, debug_info = await process_scnet_ultra_fast(
                 log_path, config_path, database_id, log_file.filename, customer_id, crossorter_type
             )
-            
+
             message = f"SCNET: {records_processed:,} records processed -> {table_name}"
-        
+
         else:
             raise HTTPException(400, f"Invalid server_type: {server_type}")
-        
+
         logger.info(f"Upload successful: {message}")
-        
+
         return ProcessResponse(
             success=True,
             message=message,
             processing_time=time.time() - start_time,
             records_processed=records_processed,
             database_id=database_id,
-            table_name=table_name
+            table_name=table_name,
+            debug_info=debug_info
         )
     
     except HTTPException:

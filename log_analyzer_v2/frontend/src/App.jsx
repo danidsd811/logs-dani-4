@@ -269,6 +269,15 @@ function LogAnalyzerApp() {
 }
 
 // Componente de Upload con Temporizador
+const fmtName = name => {
+  if (!name) return name;
+  return name.split(' ').map(word =>
+    /^[A-Z]{2,3}$/.test(word)          // códigos de país/región en mayúsculas (ES, FR, US…)
+      ? word
+      : word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+  ).join(' ');
+};
+
 function CustomerCombobox({ value, onChange, customers }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -300,7 +309,7 @@ function CustomerCombobox({ value, onChange, customers }) {
           {selected ? (
             <>
               <span className={`flex-shrink-0 ${selected.charts?.length ? 'text-green-500' : 'text-gray-300'}`}>●</span>
-              <span className="truncate">{selected.name}</span>
+              <span className="truncate">{fmtName(selected.name)}</span>
             </>
           ) : (
             <span className="text-gray-400">— Select customer —</span>
@@ -336,7 +345,7 @@ function CustomerCombobox({ value, onChange, customers }) {
                   <div key={c.id} onClick={() => pick(c.id)}
                     className={`flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-green-50 ${value === c.id ? 'bg-green-50 font-semibold' : ''}`}>
                     <span className="text-green-500 flex-shrink-0 text-xs">●</span>
-                    <span className="truncate">{c.name}</span>
+                    <span className="truncate">{fmtName(c.name)}</span>
                   </div>
                 ))}
               </>
@@ -350,7 +359,7 @@ function CustomerCombobox({ value, onChange, customers }) {
                   <div key={c.id} onClick={() => pick(c.id)}
                     className={`flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50 ${value === c.id ? 'bg-gray-100 font-semibold' : ''}`}>
                     <span className="text-gray-300 flex-shrink-0 text-xs">●</span>
-                    <span className="truncate text-gray-600">{c.name}</span>
+                    <span className="truncate text-gray-600">{fmtName(c.name)}</span>
                   </div>
                 ))}
               </>
@@ -593,20 +602,24 @@ function UploadTab({ onUploadSuccess, uploadStatus, customers }) {
 
         {/* Upload Status */}
         {uploadStatus && (
-          <div className="mt-6 p-4 bg-green-50 border border-green-200 rounded-md">
+          <div className={`mt-6 p-4 rounded-md border ${uploadStatus.records_processed === 0 ? 'bg-amber-50 border-amber-300' : 'bg-green-50 border-green-200'}`}>
             <div className="flex">
-              <div className="ml-3">
-                <h3 className="text-sm font-medium text-green-800">
-                  Processing Complete! 🎉
+              <div className="ml-3 w-full">
+                <h3 className={`text-sm font-medium ${uploadStatus.records_processed === 0 ? 'text-amber-800' : 'text-green-800'}`}>
+                  {uploadStatus.records_processed === 0 ? 'Procesamiento completado — 0 registros insertados' : 'Processing Complete!'}
                 </h3>
-                <div className="mt-2 text-sm text-green-700">
+                <div className={`mt-2 text-sm ${uploadStatus.records_processed === 0 ? 'text-amber-700' : 'text-green-700'}`}>
                   <p>Records processed: <strong>{uploadStatus.records_processed?.toLocaleString()}</strong></p>
                   <p>Total time: <strong>{uploadStatus.total_time?.toFixed(2)}s</strong></p>
                   <p>Table created: <strong>{uploadStatus.table_name}</strong></p>
                   <p>Database ID: <strong>{uploadStatus.database_id}</strong></p>
-                  <p className="text-xs mt-2 text-green-600">
-                  </p>
                 </div>
+                {uploadStatus.debug_info && (
+                  <div className="mt-3 p-3 bg-amber-100 border border-amber-300 rounded text-xs font-mono text-amber-900 whitespace-pre-wrap break-all">
+                    <p className="font-bold mb-1 font-sans">Diagnóstico del parser:</p>
+                    {uploadStatus.debug_info}
+                  </div>
+                )}
               </div>
             </div>
           </div>
