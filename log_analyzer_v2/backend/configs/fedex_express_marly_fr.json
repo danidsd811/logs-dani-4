@@ -1,0 +1,61 @@
+{
+  "id": "fedex_express_marly_fr",
+  "name": "Fedex Express Marly la Ville FR",
+  "charts": ["induction_quality", "sort_quality", "scale_quality"],
+  "hostpic_column": "hostpic",
+  "entry_point": {
+    "column": "parcelentrancepoint",
+    "column_aliases": ["parcel_entrance_point", "entrancepoint", "entrance_point"],
+    "pattern": "0*50\\.([0-9]{2})\\.",
+    "group": 1
+  },
+  "zones": [
+    {"id": 1, "name": "INFEED 1", "codes": ["04","05","06"]},
+    {"id": 2, "name": "INFEED 2", "codes": ["07","08","09"]},
+    {"id": 3, "name": "INFEED 3", "codes": ["10","11","12"]},
+    {"id": 4, "name": "INFEED 4", "codes": ["23","24","25"]},
+    {"id": 5, "name": "INFEED 5", "codes": ["26","27","28"]},
+    {"id": 6, "name": "INFEED 6", "codes": ["29","30","31"]},
+    {"id": 99, "name": "Loop", "codes": []}
+  ],
+  "default_zone_id": 99,
+  "sort_report": {"message_id": 60},
+  "good_package": {
+    "message_id": 60,
+    "conditions": [
+      {"column": "lastdestination",          "op": "!=", "value": "998"},
+      {"column": "originaldestinationstate", "op": "=",  "value": "1", "optional": true}
+    ]
+  },
+  "bad_package": {
+    "message_id": 62,
+    "conditions": [
+      {"column": "lastdestination", "op": "=", "value": "998"}
+    ]
+  },
+  "scale_quality": {
+    "message_id": 60,
+    "field": "ScannerData1",
+    "ok_prefix": "6",
+    "ok_contains": "g",
+    "no_scan_value": "1  0",
+    "error_codes": {
+      "1": "No Data received",
+      "2": "Data too short",
+      "3": "Data too long",
+      "4": "No weight",
+      "7": "Data not OK",
+      "8": "Too light",
+      "9": "Too heavy"
+    },
+    "exclude_from_pct": ["8", "9"],
+    "pre_scale_entry_points": [
+      "50.04.01",
+      "50.07.01",
+      "50.10.01",
+      "50.23.01",
+      "50.26.01",
+      "50.29.01"
+    ]
+  }
+}
