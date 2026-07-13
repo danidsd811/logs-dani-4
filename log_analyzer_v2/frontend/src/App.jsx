@@ -431,6 +431,10 @@ function UploadTab({ onUploadSuccess, uploadStatus, customers }) {
   // 🚀 FIX CRÍTICO: handleUpload con timeout para archivos de 500MB+
   const handleUpload = async (e) => {
   e.preventDefault();
+  if (!customerId) {
+    alert('Debes seleccionar un cliente antes de procesar.');
+    return;
+  }
   if (!logFile || !configFile) {
     alert('Please select both files');
     return;
@@ -535,17 +539,20 @@ function UploadTab({ onUploadSuccess, uploadStatus, customers }) {
             </div>
           </div>
 
-          {/* Customer Selection */}
-          {customers.length > 0 && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Customer</label>
-              <CustomerCombobox
-                value={customerId}
-                onChange={setCustomerId}
-                customers={customers}
-              />
-            </div>
-          )}
+          {/* Customer Selection — obligatorio */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700">
+              Customer <span className="text-red-500">*</span>
+            </label>
+            <CustomerCombobox
+              value={customerId}
+              onChange={setCustomerId}
+              customers={customers}
+            />
+            {!customerId && (
+              <p className="mt-1 text-xs text-red-500">Selecciona un cliente para continuar.</p>
+            )}
+          </div>
 
           {/* Log File Upload */}
           <div>
@@ -579,12 +586,12 @@ function UploadTab({ onUploadSuccess, uploadStatus, customers }) {
           <div>
             <button
               type="submit"
-              disabled={uploading || !logFile || !configFile}
+              disabled={uploading || !logFile || !configFile || !customerId}
               className={
                 'w-full flex justify-center items-center py-2.5 px-8 rounded-lg text-base font-semibold transition-colors duration-200 ' +
                 (uploading
                   ? 'bg-gradient-to-r from-blue-400 via-blue-500 to-indigo-500 border-2 border-blue-300 shadow-lg text-white'
-                  : (!logFile || !configFile)
+                  : (!logFile || !configFile || !customerId)
                     ? 'bg-gray-400 text-white cursor-not-allowed'
                     : 'bg-blue-600 hover:bg-blue-700 text-white border border-transparent shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500')
               }
