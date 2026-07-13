@@ -1186,7 +1186,7 @@ async def query_logs(database_id: str, query: LogQuery):
             params.append(query.message_id)
         
         if query.search:
-            text_cols = columns[2:7]  # Solo primeras 5 columnas para eficiencia
+            text_cols = columns[2:]  # Todas las columnas de texto (excluye timestamp y message_id)
             search_conds = [f"{col}::text ILIKE ${len(params) + 1}" for col in text_cols]
             if search_conds:
                 conditions.append(f"({' OR '.join(search_conds)})")
