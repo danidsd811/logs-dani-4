@@ -1067,13 +1067,13 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, onRefreshDat
   }, [sortQuality]);
 
   const sortChartData = useMemo(() => {
-    if (!sortQuality?.data?.length) return { rows: [], infeeds: [] };
+    if (!sortQuality?.data?.length) return { rows: [], states: [] };
     const data = sortQuality.data;
 
     // Infeeds ordenados por zone_id
     const infeedMap = {};
     data.forEach(r => { infeedMap[r.zone_id] = { zone_id: r.zone_id, zone_name: r.zone_name }; });
-    const infeeds = Object.values(infeedMap).sort((a, b) => a.zone_id - b.zone_id).map(z => z.zone_name);
+    const infeeds = Object.values(infeedMap).sort((a, b) => a.zone_id - b.zone_id);
 
     // Estados ordenados: ODS=1 primero, resto alfanumérico
     const states = [...new Set(data.map(r => r.state))].sort((a, b) => {
@@ -1082,14 +1082,16 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, onRefreshDat
       return a.localeCompare(b);
     });
 
-    // Una fila por ODS, columnas = nombre de INFEED
-    const odsMap = {};
-    data.forEach(r => {
-      if (!odsMap[r.state]) odsMap[r.state] = { state: r.state };
-      odsMap[r.state][r.zone_name] = (odsMap[r.state][r.zone_name] || 0) + r.count;
+    // Una fila por infeed, columnas = ODS state
+    const rows = infeeds.map(({ zone_id, zone_name }) => {
+      const row = { zone_name };
+      data.filter(r => r.zone_id === zone_id).forEach(r => {
+        row[r.state] = (row[r.state] || 0) + r.count;
+      });
+      return row;
     });
-    const rows = states.map(s => odsMap[s]).filter(Boolean);
-    return { rows, infeeds };
+
+    return { rows, states };
   }, [sortQuality]);
 
   useEffect(() => { setFilterChartHour(''); setHostpicsExpanded(false); setOtrosExpanded(false); }, [selectedDatabase?.id]);
@@ -1193,7 +1195,7 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, onRefreshDat
           {!sortMinimized && (
             <div className="px-6 pb-6">
               <p className="text-sm text-gray-500 mb-4">
-                Paquetes únicos (HOSTPIC × ODS) agrupados por estado · cada color = punto de entrada
+                Paquetes únicos (HOSTPIC × ODS) por infeed · cada color = motivo ODS
               </p>
               {sortKpis ? (
                 <>
@@ -1218,11 +1220,10 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, onRefreshDat
                     <BarChart data={sortChartData.rows} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis
-                        dataKey="state"
+                        dataKey="zone_name"
                         tick={{ fontSize: 11 }}
-                        tickFormatter={v => `${v} · ${ODS_LABELS[v] || v}`}
                         interval={0}
-                        angle={-20}
+                        angle={-15}
                         textAnchor="end"
                         height={50}
                       />
@@ -1233,21 +1234,23 @@ function ChartsTab({ databases, selectedDatabase, onDatabaseSelect, onRefreshDat
                           const total = payload.reduce((s, p) => s + (p.value || 0), 0);
                           return (
                             <div className="bg-white border border-gray-200 rounded-lg p-3 shadow text-sm max-w-xs">
-                              <p className="font-semibold text-gray-800 mb-1">ODS {label} — {ODS_LABELS[label] || label}</p>
+                              <p className="font-semibold text-gray-800 mb-1">{label}</p>
                               <p className="text-xs text-gray-400 mb-2">Total: {total.toLocaleString()}</p>
                               {payload.filter(p => p.value > 0).map(p => (
                                 <p key={p.dataKey} style={{ color: p.fill }}>
-                                  {p.dataKey}: {p.value.toLocaleString()}
+                                  ODS {p.dataKey} — {ODS_LABELS[p.dataKey] || p.dataKey}: {p.value.toLocaleString()}
                                 </p>
                               ))}
                             </div>
                           );
                         }}
                       />
-                      <Legend />
-                      {sortChartData.infeeds.map((infeed, i) => (
-                        <Bar key={infeed} dataKey={infeed} stackId="s"
-                          fill={['#3B82F6','#8B5CF6','#F97316','#10B981','#EC4899','#0EA5E9','#9CA3AF'][i % 7]} />
+                      <Legend
+                        formatter={v => `ODS ${v} — ${ODS_LABELS[v] || v}`}
+                      />
+                      {sortChartData.states.map(state => (
+                        <Bar key={state} dataKey={state} stackId="s"
+                          fill={ODS_COLORS[state] || '#9CA3AF'} />
                       ))}
                     </BarChart>
                   </ResponsiveContainer>

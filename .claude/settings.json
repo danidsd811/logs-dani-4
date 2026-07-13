@@ -1,0 +1,60 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git commit -m ' *)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(npm install *)",
+      "Bash(npx react-scripts *)",
+      "Bash(node_modules\\.bin\\react-scripts build *)",
+      "PowerShell(Set-Location \"c:\\\\Users\\\\esdsanc\\\\OneDrive - Vanderlande\\\\Documents\\\\Documents y Proyectos Dani\\\\Proyectos Dani\\\\Logs Dani\\\\Logs Dani 4\\\\log_analyzer_v2\\\\frontend\"; $env:CI = \"false\"; npm run build 2>&1 | Select-Object -Last 25)",
+      "Skill(fewer-permission-prompts)",
+      "Skill(fewer-permission-prompts:*)",
+      "Bash(python3 -)",
+      "Bash(curl -s http://localhost:8000*)",
+      "Bash(docker-compose ps*)",
+      "Bash(docker-compose logs*)",
+      "Bash(docker compose ps*)",
+      "Bash(docker compose logs*)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Bash(bash \".claude/hooks/py-syntax-check.sh\")",
+      "Bash(bash \".claude/hooks/code-review-reminder.sh\")",
+      "Bash(node -e ' *)",
+      "Bash(grep -n \"return { rows, states }\\\\|return { rows, infeeds }\\\\|dataKey=\\\\\"zone_name\\\\\"\\\\|sortChartData.states.map\\\\|ODS_COLORS\\\\[state\\\\]\\\\|ODS_LABELS\\\\[p.dataKey\\\\]\" \"log_analyzer_v2/frontend/src/App.jsx\")",
+      "Bash(grep -rn \"return { rows, states }\\\\|dataKey=\\\\\"zone_name\\\\\"\\\\|sortChartData.states.map\" \"log_analyzer_v2/\")",
+      "Bash(git -C \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4\" add log_analyzer_v2/frontend/src/App.jsx .claude/)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\esdsanc\\OneDrive - Vanderlande\\Documents\\Documents y Proyectos Dani\\Proyectos Dani\\Logs Dani\\Logs Dani 4\\.claude"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \".claude/hooks/py-syntax-check.sh\"",
+            "shell": "bash",
+            "timeout": 10,
+            "statusMessage": "Comprobando sintaxis Python..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \".claude/hooks/code-review-reminder.sh\"",
+            "shell": "bash",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
