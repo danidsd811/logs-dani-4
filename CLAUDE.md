@@ -40,7 +40,20 @@ log_analyzer_v2/
 │       ├── clients_registry.json   # Lista de todos los clientes (mínimo: id + name)
 │       └── <cliente_id>.json       # Config completa con analytics (opcional)
 └── frontend/
-    └── src/App.jsx           # Toda la UI: un solo fichero, tres pestañas
+    └── src/
+        ├── App.jsx                          # Orquestador: estado global, fetching, routing entre pestañas
+        ├── constants.js                     # API_BASE, SCALE_COLORS, ODS_*, BLOCKED_* (compartidos)
+        └── components/
+            ├── CustomerCombobox.jsx         # Dropdown con búsqueda para selección de cliente
+            ├── UploadTab.jsx                # Formulario de subida de logs
+            ├── ViewLogsTab.jsx              # Tabla paginada con búsqueda
+            ├── HostpicsTable.jsx            # Tabla de HOSTPICs con filtros y paginación propia
+            └── ChartsTab/
+                ├── index.jsx                # Selector de BD + loading state + monta los charts
+                ├── SortQualityChart.jsx     # Calidad de Clasificación por ODS (stacked bar)
+                ├── InductionQualityChart.jsx # Calidad de Inducción por Infeed + detalle HOSTPICs
+                ├── ScaleQualityChart.jsx    # Calidad de Básculas por Infeed
+                └── BlockedStatusChart.jsx   # Motivos de Mal Inducido (Parcel Blocked Status)
 ```
 
 ### Backend (`main.py`)
@@ -125,16 +138,19 @@ Cada archivo `configs/<id>.json` tiene esta estructura:
 }
 ```
 
-- `charts` controla qué gráficas se muestran en Analytics. Valores posibles: `induction_quality`, `sort_quality`, `scale_quality`.
+- `charts` controla qué gráficas se muestran en Analytics. Valores posibles: `induction_quality`, `sort_quality`, `scale_quality`, `blocked_status`.
 - `column_aliases` en `entry_point` permite encontrar la columna aunque se llame distinto en cada instalación.
 - Las condiciones de `good_package`/`bad_package` usan `find_column()` que normaliza nombre (minúsculas, sin guiones bajos) para ser agnóstico al nombre exacto de la columna.
 - Los clientes sin analytics completo van en `clients_registry.json` (solo `id` + `name`).
 
-### Frontend (`App.jsx`)
+### Frontend
 
-Un solo archivo. Tres pestañas principales:
-- **Upload & Process**: formulario de subida; cliente obligatorio (valida en `handleUpload` y deshabilita el botón).
-- **View Logs**: tabla paginada con búsqueda en todas las columnas de texto (`ILIKE`), filtro por `message_id`.
-- **Analytics & Charts**: selector siempre visible (nunca oculto por early return); estado `analyticsLoading` propio independiente del `loading` de View Logs.
+El estado global (databases, selectedDatabase, analyticsLoading, todos los datos de analytics) vive en `LogAnalyzerApp` (`App.jsx`). Tres pestañas principales:
 
-El estado compartido (databases, selectedDatabase, analyticsLoading) vive en `LogAnalyzerApp`. `fetchDatabases()` auto-selecciona `data[0]` cuando `selectedDatabase` es null.
+- **Upload & Process** (`UploadTab.jsx`): formulario de subida; cliente obligatorio (valida en `handleUpload` y deshabilita el botón). Usa `CustomerCombobox` para el selector.
+- **View Logs** (`ViewLogsTab.jsx`): tabla paginada con búsqueda en todas las columnas de texto (`ILIKE`). La búsqueda resalta coincidencias con `<span>`.
+- **Analytics & Charts** (`ChartsTab/index.jsx`): selector siempre visible (nunca oculto por early return); estado `analyticsLoading` propio independiente del `loading` de View Logs.
+
+Cada chart (`SortQualityChart`, `InductionQualityChart`, `ScaleQualityChart`, `BlockedStatusChart`) gestiona su propio estado de minimizado internamente. Todos los charts nuevos deben ser minimizables. Reciben `selectedDatabaseId` para resetear filtros cuando cambia la BD. `fetchDatabases()` auto-selecciona `data[0]` cuando `selectedDatabase` es null.
+
+El endpoint `/databases/{id}/blocked_status` usa bitmask: `parcel_blocked_status` es suma de potencias de 2 (FrontFault=1, RearFault=2, MultipleCarriers=4, etc.). El chart descompone cada valor en flags individuales; un HOSTPIC puede contabilizarse en varios flags simultáneamente.

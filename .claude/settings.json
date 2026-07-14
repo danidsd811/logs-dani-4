@@ -32,7 +32,11 @@
       "Bash(grep -n \"scaleMinimized\\\\|hostpicsExpanded\\\\|<\\\\/>\\\\|return null\\\\|ChartsTab\\\\|export default\\\\|function \" \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4/log_analyzer_v2/frontend/src/App.jsx\")",
       "Bash(grep -n \"Motivos de Mal\\\\|blockedMinimized\\\\|flex gap-8 flex-wrap\\\\|pb-5\\\\|pb-6\\\\|<\\\\/div>\" \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4/log_analyzer_v2/frontend/src/App.jsx\")",
       "Bash(git -C \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4\" diff --stat)",
-      "Bash(git -C \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4\" add log_analyzer_v2/backend/configs/mercadolibre_brasil.json log_analyzer_v2/backend/main.py log_analyzer_v2/frontend/src/App.jsx .claude/settings.json)"
+      "Bash(git -C \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4\" add log_analyzer_v2/backend/configs/mercadolibre_brasil.json log_analyzer_v2/backend/main.py log_analyzer_v2/frontend/src/App.jsx .claude/settings.json)",
+      "Bash(curl -s \"http://localhost:8000/databases/scnet_12_1/induction_quality\")",
+      "Bash(python -c ' *)",
+      "Bash(curl -s \"http://localhost:8000/databases/scnet_1784041451_Cajamar_Dia%2012/induction_quality\")",
+      "Bash(git -C \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4\" add log_analyzer_v2/frontend/src/App.jsx log_analyzer_v2/frontend/src/constants.js log_analyzer_v2/frontend/src/components/ CLAUDE.md .claude/settings.json)"
     ],
     "additionalDirectories": [
       "c:\\Users\\esdsanc\\OneDrive - Vanderlande\\Documents\\Documents y Proyectos Dani\\Proyectos Dani\\Logs Dani\\Logs Dani 4\\.claude"
