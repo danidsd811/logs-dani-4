@@ -713,6 +713,15 @@ async def init_database():
         await conn.execute("""
             ALTER TABLE databases ADD COLUMN IF NOT EXISTS customer_id VARCHAR(100)
         """)
+        # Tabla para configs de log guardadas por cliente (analytics)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS customer_log_configs (
+                customer_id VARCHAR(100) PRIMARY KEY,
+                filename TEXT NOT NULL,
+                content BYTEA NOT NULL,
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
 async def get_unique_table_name(base_name: str) -> str:
     pool = await get_db_pool()
@@ -1040,12 +1049,18 @@ async def root():
 
 @app.get("/customers")
 async def list_customers():
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT customer_id, filename FROM customer_log_configs")
+    saved = {row['customer_id']: row['filename'] for row in rows}
     return [
         {
             "id": cfg["id"],
             "name": cfg["name"],
             "charts": cfg.get("charts", []),
-            "crossorter_type": "xxl" if cfg.get("crossorter_xxl") else "standard"
+            "crossorter_type": "xxl" if cfg.get("crossorter_xxl") else "standard",
+            "server_type": cfg.get("server_type", "eDS"),
+            "log_config_filename": saved.get(cfg["id"]) if cfg.get("charts") else None,
         }
         for cfg in CUSTOMER_CONFIGS.values()
     ]
@@ -1053,17 +1068,48 @@ async def list_customers():
 @app.post("/upload", response_model=ProcessResponse)
 async def upload_files(
     log_file: UploadFile = File(...),
-    config_file: UploadFile = File(...),
+    config_file: Optional[UploadFile] = File(None),
     server_type: str = Query("eDS"),
     customer_id: Optional[str] = Query(None),
     crossorter_type: str = Query("standard")
 ):
     start_time = time.time()
-    
-    # Detectar tipo de tecnología basado en extensiones de archivo
-    log_extension = log_file.filename.split('.')[-1].lower()
-    config_extension = config_file.filename.split('.')[-1].lower()
-    
+    pool = await get_db_pool()
+
+    customer_cfg = CUSTOMER_CONFIGS.get(customer_id) if customer_id else None
+    has_analytics = bool(customer_cfg and customer_cfg.get('charts'))
+
+    # Resolver config: del upload o de la caché en BD
+    if config_file is not None:
+        config_content = await config_file.read()
+        config_filename = config_file.filename
+        # Guardar en BD si el cliente tiene analytics
+        if has_analytics and customer_id:
+            async with pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO customer_log_configs (customer_id, filename, content, uploaded_at)
+                    VALUES ($1, $2, $3, NOW())
+                    ON CONFLICT (customer_id) DO UPDATE
+                    SET filename = EXCLUDED.filename,
+                        content  = EXCLUDED.content,
+                        uploaded_at = NOW()
+                """, customer_id, config_filename, config_content)
+    elif has_analytics and customer_id:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT filename, content FROM customer_log_configs WHERE customer_id = $1",
+                customer_id
+            )
+        if row is None:
+            raise HTTPException(400, "No hay config guardada para este cliente. Sube el fichero de config la primera vez.")
+        config_content = bytes(row['content'])
+        config_filename = row['filename']
+    else:
+        raise HTTPException(400, "Config file is required.")
+
+    log_extension    = log_file.filename.split('.')[-1].lower()
+    config_extension = config_filename.split('.')[-1].lower()
+
     # Validar combinaciones de archivos
     if server_type.lower() == "eds":
         if log_extension != 'log':
@@ -1077,22 +1123,22 @@ async def upload_files(
             raise HTTPException(400, "SCNET requires a .xml configuration file")
     else:
         raise HTTPException(400, f"Unsupported server_type: {server_type}. Use 'eDS' or 'SCNET'")
-    
+
     # Generar ID único para la base de datos
     database_id = f"{server_type.lower()}_{int(time.time())}_{log_file.filename.split('.')[0]}"
-    
+
     # Guardar archivos temporales
     with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{log_extension}') as tmp_log, \
          tempfile.NamedTemporaryFile(delete=False, suffix=f'.{config_extension}') as tmp_config:
-        
+
         tmp_log.write(await log_file.read())
-        tmp_config.write(await config_file.read())
+        tmp_config.write(config_content)
         log_path, config_path = tmp_log.name, tmp_config.name
     
     try:
         # Procesar según el tipo de tecnología
         if server_type.lower() == "eds":
-            logger.info(f"Processing eDS files: {log_file.filename} + {config_file.filename}")
+            logger.info(f"Processing eDS files: {log_file.filename} + {config_filename}")
             
             # Cargar configuración JSON
             with open(config_path, 'r', encoding='utf-8') as f:
@@ -1107,7 +1153,7 @@ async def upload_files(
             message = f"eDS: {records_processed:,} records processed -> {table_name}"
 
         elif server_type.lower() == "scnet":
-            logger.info(f"Processing SCNET files: {log_file.filename} + {config_file.filename}")
+            logger.info(f"Processing SCNET files: {log_file.filename} + {config_filename}")
 
             # Procesar con SCNET (XML + FSC)
             records_processed, processing_time, table_name, debug_info = await process_scnet_ultra_fast(
@@ -1317,6 +1363,79 @@ async def get_induction_quality(database_id: str):
             'columns_used': {'hostpic': hostpic_col, 'entry_point': entrypoint_col},
             'customer': cfg['name'],
         }
+
+BLOCKED_STATUS_FLAGS = [
+    (1,   "FrontFault"),
+    (2,   "RearFault"),
+    (4,   "MultipleCarriers"),
+    (8,   "MultipleFault"),
+    (16,  "SmallItemOverlappingGap"),
+    (32,  "Unsortable"),
+    (64,  "ScreenFault"),
+    (128, "SortRestricted"),
+    (256, "MultipleDataForOneItem"),
+]
+
+@app.get("/databases/{database_id}/blocked_status")
+async def get_blocked_status(database_id: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        table_name, safe_table, columns, cfg = await _get_db_info(conn, database_id)
+        bs_cfg  = cfg.get('blocked_status') if cfg else None
+        bad_cfg = cfg.get('bad_package')    if cfg else None
+        if not bs_cfg or not bad_cfg:
+            return {"data": [], "error": "Blocked status not configured for this customer"}
+
+        hostpic_col = find_column(columns, cfg.get('hostpic_column', 'hostpic'))
+        status_col  = find_column(columns, bs_cfg.get('column', 'parcel_blocked_status'), 'parcelblockedstatus')
+        if not hostpic_col or not status_col:
+            return {"data": [], "error": "Required columns not found"}
+
+        bad_msg_id = bad_cfg.get('message_id', 21)
+        bad_where  = build_condition_sql(bad_cfg.get('conditions', []), columns)
+
+        rows = await conn.fetch(f"""
+            WITH first_occ AS (
+                SELECT DISTINCT ON ({hostpic_col})
+                    {status_col}::integer AS status
+                FROM {safe_table}
+                WHERE message_id = {bad_msg_id}
+                  AND {bad_where}
+                  AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
+                  AND {status_col} IS NOT NULL
+                  AND TRIM({status_col}) != ''
+                ORDER BY {hostpic_col}, timestamp ASC NULLS LAST
+            )
+            SELECT status, COUNT(*)::integer AS cnt
+            FROM first_occ
+            WHERE status > 0
+            GROUP BY status
+        """)
+
+        flag_counts = {}
+        total_hostpics = 0
+
+        for row in rows:
+            status = int(row['status'])
+            cnt    = int(row['cnt'])
+            total_hostpics += cnt
+            for flag_val, flag_name in BLOCKED_STATUS_FLAGS:
+                if status & flag_val:
+                    flag_counts[flag_name] = flag_counts.get(flag_name, 0) + cnt
+
+        data = sorted([
+            {
+                "flag":  flag_name,
+                "value": flag_val,
+                "count": flag_counts[flag_name],
+                "pct":   round(flag_counts[flag_name] / total_hostpics * 100, 1) if total_hostpics > 0 else 0,
+            }
+            for flag_val, flag_name in BLOCKED_STATUS_FLAGS
+            if flag_name in flag_counts
+        ], key=lambda x: -x["count"])
+
+        return {"data": data, "total": total_hostpics}
+
 
 @app.get("/databases/{database_id}/bad_hostpics")
 async def get_bad_hostpics(database_id: str):

@@ -23,7 +23,16 @@
       "Bash(node -e ' *)",
       "Bash(grep -n \"return { rows, states }\\\\|return { rows, infeeds }\\\\|dataKey=\\\\\"zone_name\\\\\"\\\\|sortChartData.states.map\\\\|ODS_COLORS\\\\[state\\\\]\\\\|ODS_LABELS\\\\[p.dataKey\\\\]\" \"log_analyzer_v2/frontend/src/App.jsx\")",
       "Bash(grep -rn \"return { rows, states }\\\\|dataKey=\\\\\"zone_name\\\\\"\\\\|sortChartData.states.map\" \"log_analyzer_v2/\")",
-      "Bash(git -C \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4\" add log_analyzer_v2/frontend/src/App.jsx .claude/)"
+      "Bash(git -C \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4\" add log_analyzer_v2/frontend/src/App.jsx .claude/)",
+      "Bash(git -C \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4\" diff --cached --stat)",
+      "Bash(git -C 'c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4' commit -m ' *)",
+      "Bash(curl -sv http://localhost:8000/customers)",
+      "Bash(python -c \"import sys,json; data=json.load\\(sys.stdin\\); ml=[c for c in data if 'mercado' in c['id'].lower\\(\\)]; print\\(json.dumps\\(ml, indent=2\\)\\)\")",
+      "Read(//c/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Voyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4/log_analyzer_v2/backend/**)",
+      "Bash(grep -n \"scaleMinimized\\\\|hostpicsExpanded\\\\|<\\\\/>\\\\|return null\\\\|ChartsTab\\\\|export default\\\\|function \" \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4/log_analyzer_v2/frontend/src/App.jsx\")",
+      "Bash(grep -n \"Motivos de Mal\\\\|blockedMinimized\\\\|flex gap-8 flex-wrap\\\\|pb-5\\\\|pb-6\\\\|<\\\\/div>\" \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4/log_analyzer_v2/frontend/src/App.jsx\")",
+      "Bash(git -C \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4\" diff --stat)",
+      "Bash(git -C \"c:/Users/esdsanc/OneDrive - Vanderlande/Documents/Documents y Proyectos Dani/Proyectos Dani/Logs Dani/Logs Dani 4\" add log_analyzer_v2/backend/configs/mercadolibre_brasil.json log_analyzer_v2/backend/main.py log_analyzer_v2/frontend/src/App.jsx .claude/settings.json)"
     ],
     "additionalDirectories": [
       "c:\\Users\\esdsanc\\OneDrive - Vanderlande\\Documents\\Documents y Proyectos Dani\\Proyectos Dani\\Logs Dani\\Logs Dani 4\\.claude"

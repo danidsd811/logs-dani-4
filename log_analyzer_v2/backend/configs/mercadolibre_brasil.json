@@ -1,7 +1,11 @@
 {
   "id": "mercadolibre_brasil",
   "name": "Mercado Libre Brasil",
-  "charts": ["induction_quality"],
+  "server_type": "SCNET",
+  "charts": ["induction_quality", "blocked_status"],
+  "blocked_status": {
+    "column": "parcel_blocked_status"
+  },
   "hostpic_column": "hostpic",
   "entry_point": {
     "column": "parcelentrypoint",
@@ -10,17 +14,19 @@
     "group": 1
   },
   "zones": [
-    {"id": 1,  "name": "INFEED 1",           "codes": ["05","06","07","08","09"]},
-    {"id": 2,  "name": "INFEED 2",           "codes": ["10","11","12","13","14"]},
-    {"id": 3,  "name": "INFEED 3",           "codes": ["15","16","17","18","19"]},
-    {"id": 4,  "name": "INFEED 4",           "codes": ["20","21","22","23","24"]},
-    {"id": 5,  "name": "INFEED 5",           "codes": ["55","56","57","58","59"]},
-    {"id": 6,  "name": "INFEED 6",           "codes": ["60","61","63","64"]},
-    {"id": 7,  "name": "INFEED 7",           "codes": ["65","66","67","68","69"]},
-    {"id": 8,  "name": "INFEED 8",           "codes": ["70","71","72","73","74"]},
-    {"id": 9,  "name": "INFEED 9",           "codes": ["25","26","27"]},
-    {"id": 10, "name": "INFEED 10",          "codes": ["28","29","30"]},
-    {"id": 99, "name": "Loop del Crossorter","codes": []}
+    {"id": 1,  "name": "INFEED 1",              "codes": ["05","06","07","08","09"]},
+    {"id": 2,  "name": "INFEED 2",              "codes": ["10","11","12","13","14"]},
+    {"id": 3,  "name": "INFEED 3",              "codes": ["15","16","17","18","19"]},
+    {"id": 4,  "name": "INFEED 4",              "codes": ["20","21","22","23","24"]},
+    {"id": 5,  "name": "INFEED 5",              "codes": ["55","56","57","58","59"]},
+    {"id": 6,  "name": "INFEED 6",              "codes": ["60","61","62","63","64"]},
+    {"id": 7,  "name": "INFEED 7",              "codes": ["65","66","67","68","69"]},
+    {"id": 8,  "name": "INFEED 8",              "codes": ["70","71","72","73","74"]},
+    {"id": 9,  "name": "INFEED 9",              "codes": ["25","26","27"]},
+    {"id": 10, "name": "INFEED 10",             "codes": ["28","29","30"]},
+    {"id": 11, "name": "Infeeds 1-2-3-4-9-10", "codes": ["04"]},
+    {"id": 12, "name": "Infeeds 5-6-7-8",       "codes": ["54"]},
+    {"id": 99, "name": "Loop del Crossorter",   "codes": []}
   ],
   "default_zone_id": 99,
   "good_package": {
