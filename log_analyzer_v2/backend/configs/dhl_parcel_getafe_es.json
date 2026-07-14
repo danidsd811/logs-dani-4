@@ -1,6 +1,7 @@
 {
   "id": "dhl_parcel_getafe_es",
   "name": "DHL Parcel Hub Getafe ES",
+  "server_type": "SCNET",
   "crossorter_xxl": true,
   "charts": ["induction_quality", "sort_quality", "scale_quality"],
   "scale_quality": {

@@ -1,7 +1,7 @@
 {
   "id": "seur_castellbisbal_es",
   "name": "SEUR Castellbisbal ES",
-  "charts": ["induction_quality", "sort_quality"],
+  "charts": ["induction_quality", "sort_quality", "tracking_losses"],
   "hostpic_column": "hostpic",
   "entry_point": {
     "column": "parcelentrancepoint",

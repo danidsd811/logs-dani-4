@@ -18,6 +18,7 @@ function LogAnalyzerApp() {
   const [sortQuality, setSortQuality] = useState(null);
   const [scaleQuality, setScaleQuality] = useState(null);
   const [blockedStatus, setBlockedStatus] = useState(null);
+  const [trackingLosses, setTrackingLosses] = useState(null);
   const [customers, setCustomers] = useState([]);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const analyticsAbortRef = useRef(null);
@@ -100,15 +101,17 @@ function LogAnalyzerApp() {
     setSortQuality(null);
     setScaleQuality(null);
     setBlockedStatus(null);
+    setTrackingLosses(null);
     setAnalyticsLoading(true);
     try {
-      const [iq, bad, good, sq, scale, bs] = await Promise.allSettled([
+      const [iq, bad, good, sq, scale, bs, tl] = await Promise.allSettled([
         fetch(`${API_BASE}/databases/${databaseId}/induction_quality`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/bad_hostpics`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/good_hostpics`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/sort_quality`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/scale_quality`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/blocked_status`, { signal }).then(r => r.json()),
+        fetch(`${API_BASE}/databases/${databaseId}/tracking_losses`, { signal }).then(r => r.json()),
       ]);
       if (signal.aborted) return;
       setInductionQuality(iq.status === 'fulfilled' ? iq.value : { data: [] });
@@ -117,6 +120,7 @@ function LogAnalyzerApp() {
       setSortQuality(sq.status === 'fulfilled' ? sq.value : { data: [] });
       setScaleQuality(scale.status === 'fulfilled' ? scale.value : { data: [] });
       setBlockedStatus(bs.status === 'fulfilled' ? bs.value : { data: [] });
+      setTrackingLosses(tl.status === 'fulfilled' ? tl.value : { data: [] });
     } catch (e) {
       if (!signal.aborted) throw e;
     } finally {
@@ -229,6 +233,7 @@ function LogAnalyzerApp() {
             sortQuality={sortQuality}
             scaleQuality={scaleQuality}
             blockedStatus={blockedStatus}
+            trackingLosses={trackingLosses}
           />
         )}
       </main>

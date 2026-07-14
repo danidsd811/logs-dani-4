@@ -1725,6 +1725,67 @@ async def get_scale_quality(database_id: str):
         }
 
 
+@app.get("/databases/{database_id}/tracking_losses")
+async def get_tracking_losses(database_id: str):
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        table_name, safe_table, columns, cfg = await _get_db_info(conn, database_id)
+        if not cfg or not cfg.get('entry_point'):
+            return {"data": [], "error": "Analytics not configured for this customer"}
+
+        sort_msg_id   = cfg.get('sort_report', {}).get('message_id', 20)
+        exitpoint_col = find_column(columns, 'parcelexitpoint', 'exitpoint', 'exit_point',
+                                    'parcel_exit_point', 'parceldestinationpoint')
+        exitstate_col = find_column(columns, 'parcelexitstate', 'exitstate', 'exit_state',
+                                    'parcel_exit_state', 'parcelstate')
+
+        if not exitpoint_col or not exitstate_col:
+            return {"data": [], "error": f"Required columns not found (exitpoint={exitpoint_col}, exitstate={exitstate_col})"}
+
+        rows = await conn.fetch(f"""
+            SELECT {exitpoint_col}, COUNT(*) AS cnt
+            FROM {safe_table}
+            WHERE message_id = {sort_msg_id}
+              AND TRIM({exitstate_col}::text) = '2'
+              AND {exitpoint_col} IS NOT NULL
+              AND TRIM({exitpoint_col}::text) NOT IN ('-', '')
+            GROUP BY {exitpoint_col}
+            ORDER BY cnt DESC
+        """)
+
+        zone_counts: Dict[int, Dict] = {}
+        total = 0
+        for row in rows:
+            ep  = str(row[exitpoint_col] or '')
+            cnt = int(row['cnt'])
+            zone = get_zone_for_entry_point(ep, cfg)
+            zid  = zone['id']
+            if zid not in zone_counts:
+                zone_counts[zid] = {'zone': zone, 'count': 0, 'points': []}
+            zone_counts[zid]['count'] += cnt
+            zone_counts[zid]['points'].append({'exit_point': ep, 'count': cnt})
+            total += cnt
+
+        zone_order = {z['id']: i for i, z in enumerate(cfg.get('zones', []))}
+        result = sorted([
+            {
+                'zone_id':   zid,
+                'zone_name': d['zone']['name'],
+                'count':     d['count'],
+                'pct':       round(d['count'] / total * 100, 1) if total > 0 else 0,
+                'points':    sorted(
+                    [{'exit_point': p['exit_point'], 'count': p['count'],
+                      'pct_of_zone': round(p['count'] / d['count'] * 100, 1) if d['count'] > 0 else 0}
+                     for p in d['points']],
+                    key=lambda x: -x['count']
+                ),
+            }
+            for zid, d in zone_counts.items()
+        ], key=lambda r: zone_order.get(r['zone_id'], 99))
+
+        return {'data': result, 'total': total, 'customer': cfg.get('name')}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

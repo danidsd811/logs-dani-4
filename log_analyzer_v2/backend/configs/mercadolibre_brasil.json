@@ -2,7 +2,7 @@
   "id": "mercadolibre_brasil",
   "name": "Mercado Libre Brasil",
   "server_type": "SCNET",
-  "charts": ["induction_quality", "blocked_status"],
+  "charts": ["induction_quality", "sort_quality", "blocked_status", "tracking_losses"],
   "blocked_status": {
     "column": "parcel_blocked_status"
   },
@@ -29,6 +29,7 @@
     {"id": 99, "name": "Loop del Crossorter",   "codes": []}
   ],
   "default_zone_id": 99,
+  "sort_report": {"message_id": 20},
   "good_package": {
     "message_id": 20,
     "conditions": [

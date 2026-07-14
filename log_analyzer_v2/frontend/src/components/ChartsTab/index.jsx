@@ -4,6 +4,7 @@ import SortQualityChart from './SortQualityChart';
 import InductionQualityChart from './InductionQualityChart';
 import ScaleQualityChart from './ScaleQualityChart';
 import BlockedStatusChart from './BlockedStatusChart';
+import TrackingLossesChart from './TrackingLossesChart';
 
 export default function ChartsTab({
   databases,
@@ -17,6 +18,7 @@ export default function ChartsTab({
   sortQuality,
   scaleQuality,
   blockedStatus,
+  trackingLosses,
 }) {
   return (
     <div className="space-y-6">
@@ -99,6 +101,7 @@ export default function ChartsTab({
             selectedDatabaseId={selectedDatabase?.id}
           />
           <BlockedStatusChart blockedStatus={blockedStatus} />
+          <TrackingLossesChart trackingLosses={trackingLosses} />
         </>
       )}
     </div>
