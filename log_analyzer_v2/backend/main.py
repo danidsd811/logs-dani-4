@@ -713,6 +713,9 @@ async def init_database():
         await conn.execute("""
             ALTER TABLE databases ADD COLUMN IF NOT EXISTS customer_id VARCHAR(100)
         """)
+        await conn.execute("""
+            ALTER TABLE databases ADD COLUMN IF NOT EXISTS analytics_cache JSONB DEFAULT NULL
+        """)
         # Tabla para configs de log guardadas por cliente (analytics)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS customer_log_configs (
@@ -1036,6 +1039,25 @@ async def _get_db_info(conn, database_id: str):
     return table_name, _safe_sql_name(table_name), columns, cfg
 
 
+async def _read_cache(conn, database_id: str, key: str):
+    """Devuelve el resultado cacheado o None si no existe."""
+    row = await conn.fetchrow(
+        "SELECT analytics_cache->>$2 AS v FROM databases WHERE id=$1",
+        database_id, key
+    )
+    return json.loads(row['v']) if (row and row['v']) else None
+
+async def _write_cache(conn, database_id: str, key: str, value) -> None:
+    """Persiste un resultado de analytics en la caché JSONB. No-fatal si falla."""
+    try:
+        await conn.execute(
+            "UPDATE databases SET analytics_cache = COALESCE(analytics_cache, '{}'::jsonb) || $2::jsonb WHERE id=$1",
+            database_id, json.dumps({key: value})
+        )
+    except Exception as e:
+        logger.warning(f"Cache write failed [{key}]: {e}")
+
+
 # API Routes
 @app.on_event("startup")
 async def startup():
@@ -1288,6 +1310,9 @@ async def get_induction_quality(database_id: str):
         table_name, safe_table, columns, cfg = await _get_db_info(conn, database_id)
         if not cfg or not cfg.get('good_package') or not cfg.get('bad_package'):
             return {"data": [], "error": "Analytics not configured for this customer"}
+        cached = await _read_cache(conn, database_id, 'induction_quality')
+        if cached is not None:
+            return cached
 
         hostpic_col    = find_column(columns, cfg.get('hostpic_column', 'hostpic'))
         ep_cfg         = cfg.get('entry_point', {})
@@ -1358,11 +1383,13 @@ async def get_induction_quality(database_id: str):
                     'hour':       hour,
                 })
 
-        return {
+        _out = {
             'data': result,
             'columns_used': {'hostpic': hostpic_col, 'entry_point': entrypoint_col},
             'customer': cfg['name'],
         }
+        await _write_cache(conn, database_id, 'induction_quality', _out)
+        return _out
 
 BLOCKED_STATUS_FLAGS = [
     (1,   "FrontFault"),
@@ -1385,6 +1412,9 @@ async def get_blocked_status(database_id: str):
         bad_cfg = cfg.get('bad_package')    if cfg else None
         if not bs_cfg or not bad_cfg:
             return {"data": [], "error": "Blocked status not configured for this customer"}
+        cached = await _read_cache(conn, database_id, 'blocked_status')
+        if cached is not None:
+            return cached
 
         hostpic_col = find_column(columns, cfg.get('hostpic_column', 'hostpic'))
         status_col  = find_column(columns, bs_cfg.get('column', 'parcel_blocked_status'), 'parcelblockedstatus')
@@ -1434,7 +1464,9 @@ async def get_blocked_status(database_id: str):
             if flag_name in flag_counts
         ], key=lambda x: -x["count"])
 
-        return {"data": data, "total": total_hostpics}
+        _out = {"data": data, "total": total_hostpics}
+        await _write_cache(conn, database_id, 'blocked_status', _out)
+        return _out
 
 
 @app.get("/databases/{database_id}/bad_hostpics")
@@ -1444,6 +1476,9 @@ async def get_bad_hostpics(database_id: str):
         table_name, safe_table, columns, cfg = await _get_db_info(conn, database_id)
         if not cfg or not cfg.get('good_package') or not cfg.get('bad_package'):
             return {"data": [], "total": 0}
+        cached = await _read_cache(conn, database_id, 'bad_hostpics')
+        if cached is not None:
+            return cached
 
         hostpic_col    = find_column(columns, cfg.get('hostpic_column', 'hostpic'))
         ep_cfg         = cfg.get('entry_point', {})
@@ -1478,7 +1513,9 @@ async def get_bad_hostpics(database_id: str):
             })
 
         data.sort(key=lambda x: (x['infeed'], x['hostpic']))
-        return {"data": data, "total": len(data)}
+        _out = {"data": data, "total": len(data)}
+        await _write_cache(conn, database_id, 'bad_hostpics', _out)
+        return _out
 
 
 @app.get("/databases/{database_id}/good_hostpics")
@@ -1488,6 +1525,9 @@ async def get_good_hostpics(database_id: str):
         table_name, safe_table, columns, cfg = await _get_db_info(conn, database_id)
         if not cfg or not cfg.get('good_package') or not cfg.get('bad_package'):
             return {"data": [], "total": 0}
+        cached = await _read_cache(conn, database_id, 'good_hostpics')
+        if cached is not None:
+            return cached
 
         hostpic_col    = find_column(columns, cfg.get('hostpic_column', 'hostpic'))
         ep_cfg         = cfg.get('entry_point', {})
@@ -1522,7 +1562,9 @@ async def get_good_hostpics(database_id: str):
             })
 
         data.sort(key=lambda x: (x['infeed'], x['hostpic']))
-        return {"data": data, "total": len(data)}
+        _out = {"data": data, "total": len(data)}
+        await _write_cache(conn, database_id, 'good_hostpics', _out)
+        return _out
 
 
 @app.get("/databases/{database_id}/sort_quality")
@@ -1532,6 +1574,9 @@ async def get_sort_quality(database_id: str):
         table_name, safe_table, columns, cfg = await _get_db_info(conn, database_id)
         if not cfg or 'sort_report' not in cfg or 'sort_quality' not in cfg.get('charts', []):
             return {"data": [], "error": "Sort quality not configured for this customer"}
+        cached = await _read_cache(conn, database_id, 'sort_quality')
+        if cached is not None:
+            return cached
 
         sort_cfg       = cfg['sort_report']
         msg_id         = sort_cfg['message_id']
@@ -1576,7 +1621,9 @@ async def get_sort_quality(database_id: str):
         ]
         result.sort(key=lambda r: (zone_order.get(r['zone_id'], 99), r['state']))
 
-        return {"data": result, "customer": cfg['name'], "columns_found": columns_found}
+        _out = {"data": result, "customer": cfg['name'], "columns_found": columns_found}
+        await _write_cache(conn, database_id, 'sort_quality', _out)
+        return _out
 
 
 @app.get("/databases/{database_id}/scale_quality")
@@ -1587,6 +1634,9 @@ async def get_scale_quality(database_id: str):
         sq_cfg = (cfg or {}).get('scale_quality')
         if not sq_cfg:
             return {"data": [], "error": "Scale quality not configured for this customer"}
+        cached = await _read_cache(conn, database_id, 'scale_quality')
+        if cached is not None:
+            return cached
 
         ep_cfg         = cfg.get('entry_point', {})
         entrypoint_col = find_column(columns, ep_cfg.get('column', 'parcelentrypoint'), *ep_cfg.get('column_aliases', []))
@@ -1717,12 +1767,14 @@ async def get_scale_quality(database_id: str):
         else:
             result = _build_rows(zone_stats, is_other=False)
 
-        return {
-            'data':           result,
-            'error_codes':    error_codes,
+        _out = {
+            'data':             result,
+            'error_codes':      error_codes,
             'exclude_from_pct': list(exclude_from_pct),
-            'customer':       cfg['name'],
+            'customer':         cfg['name'],
         }
+        await _write_cache(conn, database_id, 'scale_quality', _out)
+        return _out
 
 
 @app.get("/databases/{database_id}/tracking_losses")
@@ -1732,6 +1784,9 @@ async def get_tracking_losses(database_id: str):
         table_name, safe_table, columns, cfg = await _get_db_info(conn, database_id)
         if not cfg or not cfg.get('entry_point'):
             return {"data": [], "error": "Analytics not configured for this customer"}
+        cached = await _read_cache(conn, database_id, 'tracking_losses')
+        if cached is not None:
+            return cached
 
         sort_msg_id   = cfg.get('sort_report', {}).get('message_id', 20)
         exitpoint_col = find_column(columns, 'parcelexitpoint', 'exitpoint', 'exit_point',
@@ -1783,7 +1838,9 @@ async def get_tracking_losses(database_id: str):
             for zid, d in zone_counts.items()
         ], key=lambda r: zone_order.get(r['zone_id'], 99))
 
-        return {'data': result, 'total': total, 'customer': cfg.get('name')}
+        _out = {'data': result, 'total': total, 'customer': cfg.get('name')}
+        await _write_cache(conn, database_id, 'tracking_losses', _out)
+        return _out
 
 
 if __name__ == "__main__":
