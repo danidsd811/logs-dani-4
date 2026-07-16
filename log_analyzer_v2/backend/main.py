@@ -114,7 +114,7 @@ def build_condition_sql(conditions: List[Dict], columns: List[str]) -> str:
             return '1=0'
         op = cond['op']
         val = cond['value'].replace("'", "''")
-        parts.append(f"TRIM({col}::text) {op} '{val}'")
+        parts.append(f"{col}::text {op} '{val}'")
     return ' AND '.join(parts) if parts else '1=1'
 
 def _safe_sql_name(name: str) -> str:
@@ -392,18 +392,12 @@ class UltraSchema:
             return None
 
     def get_create_table_sql(self, table_name: str) -> str:
-        """SQL para crear tabla"""
+        """SQL para crear tabla (sin índices — se crean después del COPY para mayor velocidad)"""
         safe_name = _safe_sql_name(table_name)
-
         column_defs = ["id BIGSERIAL PRIMARY KEY"]
         for col_name, col_type in self.columns:
             column_defs.append(f"{col_name} {col_type}")
-
-        return f"""
-        CREATE TABLE {safe_name} ({', '.join(column_defs)});
-        CREATE INDEX idx_{safe_name}_msgid ON {safe_name}(message_id);
-        CREATE INDEX idx_{safe_name}_ts ON {safe_name}(timestamp);
-        """
+        return f"CREATE TABLE {safe_name} ({', '.join(column_defs)})"
 
 
 class SCNETSchemaOptimized:
@@ -683,18 +677,12 @@ class SCNETSchemaOptimized:
             return None
 
     def get_create_table_sql(self, table_name: str) -> str:
-        """SQL para crear tabla SCNET"""
+        """SQL para crear tabla SCNET (sin índices — se crean después del COPY para mayor velocidad)"""
         safe_name = _safe_sql_name(table_name)
-        
         column_defs = ["id BIGSERIAL PRIMARY KEY"]
         for col_name, col_type in self.columns:
             column_defs.append(f"{col_name} {col_type}")
-        
-        return f"""
-        CREATE TABLE {safe_name} ({', '.join(column_defs)});
-        CREATE INDEX idx_{safe_name}_msgid ON {safe_name}(message_id);
-        CREATE INDEX idx_{safe_name}_ts ON {safe_name}(timestamp);
-        """
+        return f"CREATE TABLE {safe_name} ({', '.join(column_defs)})"
 
 # Database functions
 async def get_db_pool():
@@ -1064,11 +1052,20 @@ async def _build_gin_index(pool, safe_table: str, table_name: str):
 
 
 async def create_analytics_indexes(pool, table_name: str, column_names: List[str]):
-    """ANALYZE + índice compuesto para analytics + índice GIN para búsqueda de texto."""
+    """Crea todos los índices DESPUÉS del COPY completo (mucho más rápido que durante la ingesta).
+    Orden: msgid + ts (bloqueantes, necesarios para analytics) → composite analytics → GIN (background)."""
     safe_table = _safe_sql_name(table_name)
 
-    # ANALYZE: da al planner estadísticas reales tras el COPY masivo (~3-10s)
     async with pool.acquire() as conn:
+        # Índices básicos de navegación — creados aquí, no en CREATE TABLE, para no ralentizar el COPY
+        try:
+            await conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{safe_table[:50]}_msgid ON {safe_table}(message_id)")
+            await conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{safe_table[:50]}_ts ON {safe_table}(timestamp)")
+            logger.info(f"Base indexes created for {table_name}")
+        except Exception as e:
+            logger.warning(f"Could not create base indexes for {table_name}: {e}")
+
+        # ANALYZE: da al planner estadísticas reales tras el COPY masivo
         try:
             await conn.execute(f"ANALYZE {safe_table}")
             logger.info(f"ANALYZE completed for {table_name}")
@@ -1440,8 +1437,8 @@ async def get_induction_quality(database_id: str):
             FROM {safe_table}
             WHERE message_id = {bad_msg_id}
             AND {bad_where}
-            AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
-            AND TRIM({entrypoint_col}) NOT IN ('-', '')
+            AND {hostpic_col} NOT IN ('-', '-1', '')
+            AND {entrypoint_col} NOT IN ('-', '')
             ORDER BY {hostpic_col}, timestamp
         """)
 
@@ -1451,8 +1448,8 @@ async def get_induction_quality(database_id: str):
             FROM {safe_table}
             WHERE message_id = {good_msg_id}
             AND {good_where}
-            AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
-            AND TRIM({entrypoint_col}) NOT IN ('-', '')
+            AND {hostpic_col} NOT IN ('-', '-1', '')
+            AND {entrypoint_col} NOT IN ('-', '')
             ORDER BY {hostpic_col}, timestamp
         """)
 
@@ -1536,9 +1533,9 @@ async def get_blocked_status(database_id: str):
                 FROM {safe_table}
                 WHERE message_id = {bad_msg_id}
                   AND {bad_where}
-                  AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
+                  AND {hostpic_col} NOT IN ('-', '-1', '')
                   AND {status_col} IS NOT NULL
-                  AND TRIM({status_col}) != ''
+                  AND {status_col} != ''
                 ORDER BY {hostpic_col}, timestamp ASC NULLS LAST
             )
             SELECT status, COUNT(*)::integer AS cnt
@@ -1602,8 +1599,8 @@ async def get_bad_hostpics(database_id: str):
             FROM {safe_table}
             WHERE message_id = {bad_msg_id}
             AND {bad_where}
-            AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
-            AND TRIM({entrypoint_col}) NOT IN ('-', '')
+            AND {hostpic_col} NOT IN ('-', '-1', '')
+            AND {entrypoint_col} NOT IN ('-', '')
             ORDER BY {hostpic_col}, {entrypoint_col}
         """)
 
@@ -1651,8 +1648,8 @@ async def get_good_hostpics(database_id: str):
             FROM {safe_table}
             WHERE message_id = {good_msg_id}
             AND {good_where}
-            AND TRIM({hostpic_col}) NOT IN ('-', '-1', '')
-            AND TRIM({entrypoint_col}) NOT IN ('-', '')
+            AND {hostpic_col} NOT IN ('-', '-1', '')
+            AND {entrypoint_col} NOT IN ('-', '')
             ORDER BY {hostpic_col}, {entrypoint_col}
         """)
 
@@ -1703,14 +1700,14 @@ async def get_sort_quality(database_id: str):
         # DISTINCT (hostpic, entry_point, state): cada par único (hostpic, ODS) cuenta una vez
         rows = await conn.fetch(f"""
             SELECT DISTINCT
-                TRIM({hostpic_col})    AS hp,
-                TRIM({entrypoint_col}) AS ep,
-                TRIM({state_col})      AS ods
+                {hostpic_col}    AS hp,
+                {entrypoint_col} AS ep,
+                {state_col}      AS ods
             FROM {safe_table}
             WHERE message_id = {msg_id}
-              AND TRIM({hostpic_col})    NOT IN ('-', '-1', '')
-              AND TRIM({entrypoint_col}) NOT IN ('-', '')
-              AND TRIM({state_col})      NOT IN ('-', '')
+              AND {hostpic_col}    NOT IN ('-', '-1', '')
+              AND {entrypoint_col} NOT IN ('-', '')
+              AND {state_col}      NOT IN ('-', '')
         """)
 
         counts: Dict[tuple, int] = {}
@@ -1765,15 +1762,16 @@ async def get_scale_quality(database_id: str):
             return {"data": [], "error": f"Columns not found (entry_point: {entrypoint_col}, scale: {scale_col})"}
 
         # Condición OK: empieza por ok_prefix Y contiene ok_contains (ej. 'g' de gramos)
-        ok_condition     = f"LEFT(TRIM({scale_col}), 1) = '{ok_prefix}'"
+        ok_condition     = f"LEFT({scale_col}, 1) = '{ok_prefix}'"
         ok_full          = ok_condition + (f" AND {scale_col} LIKE '%{ok_contains}%'" if ok_contains else "")
         # Unknown: empieza por ok_prefix pero NO contiene ok_contains (6 sin 'g')
         unknown_condition = (ok_condition + f" AND {scale_col} NOT LIKE '%{ok_contains}%'") if ok_contains else "FALSE"
 
-        # Normalizar espacios internos para comparación robusta (ej. "1  0", "1 0", "1   0" → "1 0")
+        # Normalizar espacios internos para comparación robusta (ej. "1  0", "1   0" → "1 0")
+        # El parser ya hace strip() exterior, pero pueden quedar dobles espacios internos en este campo
         no_scan_normalized = re.sub(r'\s+', ' ', no_scan_value.strip()) if no_scan_value else ''
         no_scan_clause = (
-            f"WHEN regexp_replace(TRIM({scale_col}), '\\s+', ' ', 'g') = '{no_scan_normalized}' THEN 'noscan'"
+            f"WHEN regexp_replace({scale_col}, '\\s+', ' ', 'g') = '{no_scan_normalized}' THEN 'noscan'"
             if no_scan_normalized else ""
         )
 
@@ -1785,11 +1783,11 @@ async def get_scale_quality(database_id: str):
                            {no_scan_clause}
                            WHEN {ok_full} THEN 'ok'
                            WHEN {unknown_condition} THEN 'unknown'
-                           ELSE LEFT(TRIM({scale_col}), 1)
+                           ELSE LEFT({scale_col}, 1)
                        END AS scale_code
                 FROM {safe_table}
                 WHERE message_id = {msg_id}
-                  AND TRIM({scale_col}) NOT IN ('-', '')
+                  AND {scale_col} NOT IN ('-', '')
                   AND {scale_col} IS NOT NULL
             ) sub
             GROUP BY ep, scale_code
@@ -1906,9 +1904,9 @@ async def get_tracking_losses(database_id: str):
             SELECT {exitpoint_col}, COUNT(*) AS cnt
             FROM {safe_table}
             WHERE message_id = {sort_msg_id}
-              AND TRIM({exitstate_col}::text) = '2'
+              AND {exitstate_col}::text = '2'
               AND {exitpoint_col} IS NOT NULL
-              AND TRIM({exitpoint_col}::text) NOT IN ('-', '')
+              AND {exitpoint_col}::text NOT IN ('-', '')
             GROUP BY {exitpoint_col}
             ORDER BY cnt DESC
         """)
