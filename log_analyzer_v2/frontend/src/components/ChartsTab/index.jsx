@@ -13,8 +13,6 @@ export default function ChartsTab({
   onRefreshDatabases,
   analyticsLoading,
   inductionQuality,
-  badHostpics,
-  goodHostpics,
   sortQuality,
   scaleQuality,
   blockedStatus,
@@ -92,8 +90,6 @@ export default function ChartsTab({
           <SortQualityChart sortQuality={sortQuality} />
           <InductionQualityChart
             inductionQuality={inductionQuality}
-            badHostpics={badHostpics}
-            goodHostpics={goodHostpics}
             selectedDatabaseId={selectedDatabase?.id}
           />
           <ScaleQualityChart

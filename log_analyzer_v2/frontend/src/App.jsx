@@ -13,8 +13,6 @@ function LogAnalyzerApp() {
   const [loading, setLoading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState(null);
   const [inductionQuality, setInductionQuality] = useState(null);
-  const [badHostpics, setBadHostpics] = useState(null);
-  const [goodHostpics, setGoodHostpics] = useState(null);
   const [sortQuality, setSortQuality] = useState(null);
   const [scaleQuality, setScaleQuality] = useState(null);
   const [blockedStatus, setBlockedStatus] = useState(null);
@@ -96,18 +94,14 @@ function LogAnalyzerApp() {
     const { signal } = controller;
 
     setInductionQuality(null);
-    setBadHostpics(null);
-    setGoodHostpics(null);
     setSortQuality(null);
     setScaleQuality(null);
     setBlockedStatus(null);
     setTrackingLosses(null);
     setAnalyticsLoading(true);
     try {
-      const [iq, bad, good, sq, scale, bs, tl] = await Promise.allSettled([
+      const [iq, sq, scale, bs, tl] = await Promise.allSettled([
         fetch(`${API_BASE}/databases/${databaseId}/induction_quality`, { signal }).then(r => r.json()),
-        fetch(`${API_BASE}/databases/${databaseId}/bad_hostpics`, { signal }).then(r => r.json()),
-        fetch(`${API_BASE}/databases/${databaseId}/good_hostpics`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/sort_quality`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/scale_quality`, { signal }).then(r => r.json()),
         fetch(`${API_BASE}/databases/${databaseId}/blocked_status`, { signal }).then(r => r.json()),
@@ -115,8 +109,6 @@ function LogAnalyzerApp() {
       ]);
       if (signal.aborted) return;
       setInductionQuality(iq.status === 'fulfilled' ? iq.value : { data: [] });
-      setBadHostpics(bad.status === 'fulfilled' ? bad.value : { data: [], total: 0 });
-      setGoodHostpics(good.status === 'fulfilled' ? good.value : { data: [], total: 0 });
       setSortQuality(sq.status === 'fulfilled' ? sq.value : { data: [] });
       setScaleQuality(scale.status === 'fulfilled' ? scale.value : { data: [] });
       setBlockedStatus(bs.status === 'fulfilled' ? bs.value : { data: [] });
@@ -228,8 +220,6 @@ function LogAnalyzerApp() {
             onRefreshDatabases={fetchDatabases}
             analyticsLoading={analyticsLoading}
             inductionQuality={inductionQuality}
-            badHostpics={badHostpics}
-            goodHostpics={goodHostpics}
             sortQuality={sortQuality}
             scaleQuality={scaleQuality}
             blockedStatus={blockedStatus}

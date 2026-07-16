@@ -1,7 +1,8 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { Activity } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import HostpicsTable from '../HostpicsTable';
+import { API_BASE } from '../../constants';
 
 function aggregateByInfeed(rows) {
   const map = {};
@@ -22,15 +23,45 @@ function aggregateByInfeed(rows) {
     .sort((a, b) => a.infeed_num - b.infeed_num);
 }
 
-export default function InductionQualityChart({ inductionQuality, badHostpics, goodHostpics, selectedDatabaseId }) {
+export default function InductionQualityChart({ inductionQuality, selectedDatabaseId }) {
   const [minimized, setMinimized] = useState(false);
   const [filterChartHour, setFilterChartHour] = useState('');
   const [hostpicsExpanded, setHostpicsExpanded] = useState(false);
+  const [badHostpics, setBadHostpics] = useState(null);
+  const [goodHostpics, setGoodHostpics] = useState(null);
+  const [hostpicsLoading, setHostpicsLoading] = useState(false);
 
   useEffect(() => {
     setFilterChartHour('');
     setHostpicsExpanded(false);
+    setBadHostpics(null);
+    setGoodHostpics(null);
+    setHostpicsLoading(false);
   }, [selectedDatabaseId]);
+
+  const fetchHostpics = useCallback(async () => {
+    if (!selectedDatabaseId || hostpicsLoading) return;
+    setHostpicsLoading(true);
+    try {
+      const [bad, good] = await Promise.all([
+        fetch(`${API_BASE}/databases/${selectedDatabaseId}/bad_hostpics`).then(r => r.json()),
+        fetch(`${API_BASE}/databases/${selectedDatabaseId}/good_hostpics`).then(r => r.json()),
+      ]);
+      setBadHostpics(bad);
+      setGoodHostpics(good);
+    } catch {
+      setBadHostpics({ data: [], total: 0 });
+      setGoodHostpics({ data: [], total: 0 });
+    } finally {
+      setHostpicsLoading(false);
+    }
+  }, [selectedDatabaseId, hostpicsLoading]);
+
+  const handleToggleHostpics = () => {
+    const next = !hostpicsExpanded;
+    setHostpicsExpanded(next);
+    if (next && badHostpics === null && !hostpicsLoading) fetchHostpics();
+  };
 
   const hours = useMemo(() => {
     if (!inductionQuality?.data?.length) return [];
@@ -214,11 +245,11 @@ export default function InductionQualityChart({ inductionQuality, badHostpics, g
             </div>
           )}
 
-          {/* Detalle HOSTPICs */}
-          {(badHostpics?.data?.length > 0 || goodHostpics?.data?.length > 0) && (
+          {/* Detalle HOSTPICs — carga lazy al expandir */}
+          {inductionQuality.data?.length > 0 && (
             <div className="mt-4 border-t border-gray-100 pt-4">
               <button
-                onClick={() => setHostpicsExpanded(v => !v)}
+                onClick={handleToggleHostpics}
                 className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 select-none"
               >
                 <span className="font-bold">{hostpicsExpanded ? '▾' : '▸'}</span>
@@ -227,22 +258,21 @@ export default function InductionQualityChart({ inductionQuality, badHostpics, g
 
               {hostpicsExpanded && (
                 <div className="mt-4 space-y-4">
-                  {badHostpics === null ? (
+                  {hostpicsLoading ? (
                     <div className="bg-white p-6 rounded-lg shadow flex items-center justify-center h-24">
-                      <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-red-500"></div>
-                      <span className="ml-3 text-gray-500 text-sm">Cargando HOSTPICs incorrectos...</span>
+                      <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
+                      <span className="ml-3 text-gray-500 text-sm">Cargando HOSTPICs...</span>
                     </div>
-                  ) : badHostpics.data?.length > 0 ? (
-                    <HostpicsTable data={badHostpics.data} total={badHostpics.total} variant="bad" />
-                  ) : null}
-                  {goodHostpics === null ? (
-                    <div className="bg-white p-6 rounded-lg shadow flex items-center justify-center h-24">
-                      <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-green-500"></div>
-                      <span className="ml-3 text-gray-500 text-sm">Cargando HOSTPICs correctos...</span>
-                    </div>
-                  ) : goodHostpics.data?.length > 0 ? (
-                    <HostpicsTable data={goodHostpics.data} total={goodHostpics.total} variant="good" />
-                  ) : null}
+                  ) : (
+                    <>
+                      {badHostpics?.data?.length > 0 && (
+                        <HostpicsTable data={badHostpics.data} total={badHostpics.total} variant="bad" />
+                      )}
+                      {goodHostpics?.data?.length > 0 && (
+                        <HostpicsTable data={goodHostpics.data} total={goodHostpics.total} variant="good" />
+                      )}
+                    </>
+                  )}
                 </div>
               )}
             </div>
