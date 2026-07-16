@@ -35,6 +35,7 @@ export default function ViewLogsTab({
   logs,
   loading,
   searchTerm,
+  appliedSearchTerm,
   onSearchTermChange,
   onSearch,
   currentPage,
@@ -133,7 +134,7 @@ export default function ViewLogsTab({
             </button>
             {searchTerm && (
               <button
-                onClick={() => { onSearchTermChange(''); onSearch(); }}
+                onClick={() => { onSearchTermChange(''); onSearch(''); }}
                 className="inline-flex items-center px-2 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-1 focus:ring-blue-500"
               >
                 <X className="h-4 w-4" />
@@ -153,9 +154,9 @@ export default function ViewLogsTab({
               <span className="mx-2">•</span>
               <span>Size: {selectedDatabase.file_size_mb?.toFixed(1) || '0'} MB</span>
             </div>
-            {searchTerm && (
+            {appliedSearchTerm && (
               <div className="bg-yellow-100 border border-yellow-300 rounded px-3 py-1 text-xs text-yellow-800">
-                Found <strong>{totalRecords.toLocaleString()}</strong> records matching "{searchTerm}"
+                Found <strong>{totalRecords.toLocaleString()}</strong> records matching "{appliedSearchTerm}"
               </div>
             )}
           </div>
@@ -205,8 +206,8 @@ export default function ViewLogsTab({
                         }
                         return (
                           <td key={column} className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                            {searchTerm && cellValue !== '-'
-                              ? highlightSearchTerm(cellValue, searchTerm)
+                            {appliedSearchTerm && cellValue !== '-'
+                              ? highlightSearchTerm(cellValue, appliedSearchTerm)
                               : cellValue}
                           </td>
                         );

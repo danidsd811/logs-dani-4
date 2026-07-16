@@ -1,5 +1,6 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 import tempfile
 import os
 import json
@@ -248,7 +249,9 @@ class UltraSchema:
             self.message_field_to_table_index[field_name] = len(self.columns) - 1
         
         self.column_count = len(self.columns)
-        
+        self.columns.append(("_search_text", "TEXT"))
+        self.column_count = len(self.columns)
+
         # Pre-computar mapeos para cada MessageID
         self._build_message_mappings(config)
         
@@ -381,12 +384,13 @@ class UltraSchema:
                             table_index = self.message_field_to_table_index[field_name]
                             record[table_index] = value
             
+            record[-1] = ' '.join(' '.join(v.split()) for v in record[2:-1] if v and v != '-')
             return record
-            
+
         except (ValueError, IndexError) as e:
             logger.debug(f"Parse error for line: {line[:50]}... Error: {e}")
             return None
-    
+
     def get_create_table_sql(self, table_name: str) -> str:
         """SQL para crear tabla"""
         safe_name = _safe_sql_name(table_name)
@@ -527,7 +531,9 @@ class SCNETSchemaOptimized:
             self.property_to_table_index[prop_name] = i + 2  # +2 por timestamp, message_id
         
         self.column_count = len(self.columns)
-        logger.info(f"Table schema created: {self.column_count} columns")
+        self.columns.append(("_search_text", "TEXT"))
+        self.column_count = len(self.columns)
+        logger.info(f"Table schema created: {self.column_count} columns (incl. _search_text)")
     
     def _create_message_mappings(self, parcel_reports: dict):
         """Crear mapeos de posición para cada MessageID - LÓGICA SIMPLIFICADA"""
@@ -668,11 +674,14 @@ class SCNETSchemaOptimized:
                         record[self.property_to_table_index[prop_name]] = value
                         mapped_count += 1
 
-            return record if mapped_count > 0 else None
+            if mapped_count > 0:
+                record[-1] = ' '.join(' '.join(v.split()) for v in record[2:-1] if v and v != '-')
+                return record
+            return None
 
         except (ValueError, IndexError):
             return None
-    
+
     def get_create_table_sql(self, table_name: str) -> str:
         """SQL para crear tabla SCNET"""
         safe_name = _safe_sql_name(table_name)
@@ -691,7 +700,7 @@ class SCNETSchemaOptimized:
 async def get_db_pool():
     global db_pool
     if db_pool is None:
-        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=5, max_size=20)
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=5)
     return db_pool
 
 async def init_database():
@@ -716,6 +725,7 @@ async def init_database():
         await conn.execute("""
             ALTER TABLE databases ADD COLUMN IF NOT EXISTS analytics_cache JSONB DEFAULT NULL
         """)
+        await conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
         # Tabla para configs de log guardadas por cliente (analytics)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS customer_log_configs (
@@ -725,6 +735,53 @@ async def init_database():
                 uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+    # Normalizar _search_text de tablas existentes en segundo plano
+    asyncio.create_task(_migrate_normalize_search_text(pool))
+
+
+async def _migrate_normalize_search_text(pool):
+    """Normaliza espacios múltiples en _search_text y sincroniza columns_info (one-shot al arrancar)."""
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT id, table_name, columns_info FROM databases")
+        for row in rows:
+            tname = row['table_name']
+            safe = _safe_sql_name(tname)
+            try:
+                async with pool.acquire() as conn:
+                    has_col = await conn.fetchval(
+                        "SELECT EXISTS(SELECT 1 FROM information_schema.columns "
+                        "WHERE table_name=$1 AND column_name='_search_text')", tname
+                    )
+                    if not has_col:
+                        continue
+                    # Sincronizar columns_info si _search_text no está en los metadatos
+                    cols = json.loads(row['columns_info'] or '[]')
+                    if '_search_text' not in cols:
+                        logger.info(f"Updating columns_info for {tname} to include _search_text")
+                        await conn.execute(
+                            "UPDATE databases SET columns_info = columns_info::jsonb || '[\"_search_text\"]' "
+                            "WHERE id = $1",
+                            row['id']
+                        )
+                    needs_fix = await conn.fetchval(
+                        f"SELECT EXISTS(SELECT 1 FROM {safe} WHERE _search_text ~ '  ' LIMIT 1)"
+                    )
+                    if not needs_fix:
+                        continue
+                    logger.info(f"Normalizing _search_text whitespace in {tname}…")
+                    await conn.execute(
+                        f"UPDATE {safe} SET _search_text = regexp_replace(_search_text, '\\s+', ' ', 'g')"
+                    )
+                    logger.info(f"_search_text normalized in {tname}, running VACUUM ANALYZE…")
+                async with pool.acquire() as conn:
+                    await conn.execute(f"VACUUM ANALYZE {safe}")
+                    logger.info(f"VACUUM ANALYZE done for {tname}")
+            except Exception as e:
+                logger.warning(f"Could not migrate _search_text in {tname}: {e}")
+    except Exception as e:
+        logger.warning(f"_migrate_normalize_search_text failed: {e}")
+
 
 async def get_unique_table_name(base_name: str) -> str:
     pool = await get_db_pool()
@@ -992,9 +1049,33 @@ async def insert_ultra_fast(pool, table_name: str, batch: List[tuple], columns: 
                 logger.error(f"Executemany failed: {e2}")
                 return 0
 
+async def _build_gin_index(pool, safe_table: str, table_name: str):
+    """Crea el índice GIN de trigramas en segundo plano (no bloquea la respuesta de upload)."""
+    idx_name = f"idx_{safe_table[:40]}_search"
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(f"""
+                CREATE INDEX IF NOT EXISTS {idx_name}
+                ON {safe_table} USING GIN (_search_text gin_trgm_ops)
+            """)
+        logger.info(f"GIN trigram index created: {idx_name}")
+    except Exception as e:
+        logger.warning(f"Could not create GIN index for {table_name}: {e}")
+
+
 async def create_analytics_indexes(pool, table_name: str, column_names: List[str]):
-    """Índice compuesto para acelerar DISTINCT ON (hostpic) en queries de Analytics"""
-    safe_table     = _safe_sql_name(table_name)
+    """ANALYZE + índice compuesto para analytics + índice GIN para búsqueda de texto."""
+    safe_table = _safe_sql_name(table_name)
+
+    # ANALYZE: da al planner estadísticas reales tras el COPY masivo (~3-10s)
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(f"ANALYZE {safe_table}")
+            logger.info(f"ANALYZE completed for {table_name}")
+        except Exception as e:
+            logger.warning(f"ANALYZE failed for {table_name}: {e}")
+
+    # Índice compuesto para queries de analytics
     hostpic_col    = find_column(column_names, 'hostpic')
     lastdest_col   = find_column(column_names, 'lastdestination', 'last_destination')
     entrypoint_col = find_column(column_names,
@@ -1002,20 +1083,23 @@ async def create_analytics_indexes(pool, table_name: str, column_names: List[str
                                  'parcel_entry_point', 'parcel_entrance_point',
                                  'entrancepoint', 'entrypoint', 'entrance_point', 'entry_point')
 
-    if not all([hostpic_col, lastdest_col, entrypoint_col]):
+    if all([hostpic_col, lastdest_col, entrypoint_col]):
+        idx_name = f"idx_{safe_table[:40]}_analytics"
+        async with pool.acquire() as conn:
+            try:
+                await conn.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {idx_name}
+                    ON {safe_table}(message_id, {lastdest_col}, {hostpic_col}, {entrypoint_col})
+                """)
+                logger.info(f"Analytics index created: {idx_name}")
+            except Exception as e:
+                logger.warning(f"Could not create analytics index for {table_name}: {e}")
+    else:
         logger.info(f"Analytics columns not detected for {table_name} — skipping composite index")
-        return
 
-    idx_name = f"idx_{safe_table[:40]}_analytics"
-    async with pool.acquire() as conn:
-        try:
-            await conn.execute(f"""
-                CREATE INDEX IF NOT EXISTS {idx_name}
-                ON {safe_table}(message_id, {lastdest_col}, {hostpic_col}, {entrypoint_col})
-            """)
-            logger.info(f"Analytics index created: {idx_name}")
-        except Exception as e:
-            logger.warning(f"Could not create analytics index for {table_name}: {e}")
+    # GIN trigram index en segundo plano (30-60s) — no bloquea la respuesta al usuario
+    if '_search_text' in column_names:
+        asyncio.create_task(_build_gin_index(pool, safe_table, table_name))
 
 
 async def _get_db_info(conn, database_id: str):
@@ -1246,40 +1330,61 @@ async def query_logs(database_id: str, query: LogQuery):
         
         table_name = db_info['table_name']
         columns = json.loads(db_info['columns_info'] or '[]')
-        
+        # columns_info puede estar desactualizado (tablas migradas antes de que se añadiera _search_text)
+        # Comprobamos directamente en el esquema real de la tabla
+        has_search_text = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.columns "
+            "WHERE table_name=$1 AND column_name='_search_text')",
+            table_name
+        )
+        display_columns = [c for c in columns if c != '_search_text']
+
         conditions, params = [], []
-        
+
         if query.message_id:
             conditions.append(f"message_id = ${len(params) + 1}")
             params.append(query.message_id)
-        
+
         if query.search:
-            text_cols = columns[2:]  # Todas las columnas de texto (excluye timestamp y message_id)
-            search_conds = [f"{col}::text ILIKE ${len(params) + 1}" for col in text_cols]
-            if search_conds:
-                conditions.append(f"({' OR '.join(search_conds)})")
-                params.append(f"%{query.search}%")
-        
+            normalized_search = ' '.join(query.search.split())
+            if has_search_text:
+                conditions.append(f"_search_text ILIKE ${len(params) + 1}")
+            else:
+                text_cols = columns[2:]
+                search_conds = [f"{col}::text ILIKE ${len(params) + 1}" for col in text_cols]
+                if search_conds:
+                    conditions.append(f"({' OR '.join(search_conds)})")
+            params.append(f"%{normalized_search}%")
+
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        
-        total_records = await conn.fetchval(f"SELECT COUNT(*) FROM {table_name} {where_clause}", *params)
-        
+
+        # COUNT aproximado (O(1)) cuando no hay filtros; exacto cuando los hay
+        if not conditions:
+            total_records = await conn.fetchval(
+                "SELECT reltuples::bigint FROM pg_class WHERE relname = $1", table_name
+            ) or 0
+        else:
+            total_records = await conn.fetchval(
+                f"SELECT COUNT(*) FROM {table_name} {where_clause}", *params
+            )
+
         offset = (query.page - 1) * query.limit
+        safe_cols = ', '.join(display_columns) if display_columns else '*'
         rows = await conn.fetch(f"""
-            SELECT * FROM {table_name} {where_clause}
+            SELECT {safe_cols} FROM {table_name} {where_clause}
             ORDER BY timestamp ASC LIMIT {query.limit} OFFSET {offset}
         """, *params)
-        
-        data = [{k: v.isoformat() if isinstance(v, datetime) else v 
-                for k, v in row.items() if k != "id"} for row in rows]
-        
+
+        data = [{k: v.isoformat() if isinstance(v, datetime) else v
+                 for k, v in row.items()} for row in rows]
+
         return LogResponse(
             data=data,
             total_records=total_records,
             page=query.page,
             total_pages=(total_records + query.limit - 1) // query.limit,
             processing_time=time.time() - start_time,
-            columns=columns
+            columns=display_columns
         )
 
 @app.get("/table/{table_name}/stats")

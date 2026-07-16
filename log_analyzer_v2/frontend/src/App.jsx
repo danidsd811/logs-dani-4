@@ -23,6 +23,7 @@ function LogAnalyzerApp() {
   const [isUploading, setIsUploading] = useState(false);
 
   const [searchTerm, setSearchTerm] = useState('');
+  const [appliedSearchTerm, setAppliedSearchTerm] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalRecords, setTotalRecords] = useState(0);
@@ -78,6 +79,7 @@ function LogAnalyzerApp() {
       setTotalRecords(data.total_records);
       setCurrentPage(page);
       setColumns(data.columns || []);
+      setAppliedSearchTerm(search || '');
     } catch (error) {
       console.error('Error fetching logs:', error);
       setLogs([]);
@@ -127,7 +129,7 @@ function LogAnalyzerApp() {
     }
   }, [selectedDatabase, activeTab]);
 
-  const handleSearch = () => { setCurrentPage(1); fetchLogs(1, searchTerm); };
+  const handleSearch = (forceTerm) => { setCurrentPage(1); fetchLogs(1, typeof forceTerm === 'string' ? forceTerm : searchTerm); };
   const handlePageChange = (page) => fetchLogs(page, searchTerm);
 
   return (
@@ -202,6 +204,7 @@ function LogAnalyzerApp() {
             logs={logs}
             loading={loading}
             searchTerm={searchTerm}
+            appliedSearchTerm={appliedSearchTerm}
             onSearchTermChange={setSearchTerm}
             onSearch={handleSearch}
             currentPage={currentPage}
