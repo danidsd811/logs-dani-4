@@ -691,13 +691,12 @@ class SCNETSchemaOptimized:
 async def get_db_pool():
     global db_pool
     if db_pool is None:
-        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=5)
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=5, max_size=20)
     return db_pool
 
 async def init_database():
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS databases (
                 id VARCHAR(100) PRIMARY KEY,
@@ -994,49 +993,29 @@ async def insert_ultra_fast(pool, table_name: str, batch: List[tuple], columns: 
                 return 0
 
 async def create_analytics_indexes(pool, table_name: str, column_names: List[str]):
-    """Índices post-carga: ANALYZE + composite analytics + GIN trigramas para búsqueda"""
-    safe_table = _safe_sql_name(table_name)
+    """Índice compuesto para acelerar DISTINCT ON (hostpic) en queries de Analytics"""
+    safe_table     = _safe_sql_name(table_name)
+    hostpic_col    = find_column(column_names, 'hostpic')
+    lastdest_col   = find_column(column_names, 'lastdestination', 'last_destination')
+    entrypoint_col = find_column(column_names,
+                                 'parcelentrypoint', 'parcelentrancepoint',
+                                 'parcel_entry_point', 'parcel_entrance_point',
+                                 'entrancepoint', 'entrypoint', 'entrance_point', 'entry_point')
 
+    if not all([hostpic_col, lastdest_col, entrypoint_col]):
+        logger.info(f"Analytics columns not detected for {table_name} — skipping composite index")
+        return
+
+    idx_name = f"idx_{safe_table[:40]}_analytics"
     async with pool.acquire() as conn:
-        # 1. ANALYZE: estadísticas precisas para el planificador de queries
         try:
-            await conn.execute(f"ANALYZE {safe_table}")
-            logger.info(f"ANALYZE complete: {table_name}")
+            await conn.execute(f"""
+                CREATE INDEX IF NOT EXISTS {idx_name}
+                ON {safe_table}(message_id, {lastdest_col}, {hostpic_col}, {entrypoint_col})
+            """)
+            logger.info(f"Analytics index created: {idx_name}")
         except Exception as e:
-            logger.warning(f"ANALYZE failed for {table_name}: {e}")
-
-        # 2. Índice compuesto para analytics (induction_quality, sort_quality, etc.)
-        hostpic_col    = find_column(column_names, 'hostpic')
-        lastdest_col   = find_column(column_names, 'lastdestination', 'last_destination')
-        entrypoint_col = find_column(column_names,
-                                     'parcelentrypoint', 'parcelentrancepoint',
-                                     'parcel_entry_point', 'parcel_entrance_point',
-                                     'entrancepoint', 'entrypoint', 'entrance_point', 'entry_point')
-        if all([hostpic_col, lastdest_col, entrypoint_col]):
-            idx_name = f"idx_{safe_table[:40]}_analytics"
-            try:
-                await conn.execute(f"""
-                    CREATE INDEX IF NOT EXISTS {idx_name}
-                    ON {safe_table}(message_id, {lastdest_col}, {hostpic_col}, {entrypoint_col})
-                """)
-                logger.info(f"Analytics index created: {idx_name}")
-            except Exception as e:
-                logger.warning(f"Could not create analytics index for {table_name}: {e}")
-        else:
-            logger.info(f"Analytics columns not detected for {table_name} — skipping composite index")
-
-        # 3. Columna _search_text + índice GIN trigramas para búsqueda en ViewLogsTab
-        search_cols = column_names[2:]  # skip timestamp y message_id
-        if search_cols:
-            concat_expr = "concat_ws(' ', " + ", ".join(f"{c}::text" for c in search_cols) + ")"
-            idx_search  = f"idx_{safe_table[:38]}_srch"
-            try:
-                await conn.execute(f"ALTER TABLE {safe_table} ADD COLUMN IF NOT EXISTS _search_text TEXT")
-                await conn.execute(f"UPDATE {safe_table} SET _search_text = {concat_expr}")
-                await conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_search} ON {safe_table} USING gin (_search_text gin_trgm_ops)")
-                logger.info(f"Search GIN index created: {idx_search}")
-            except Exception as e:
-                logger.warning(f"Could not create search index for {table_name}: {e}")
+            logger.warning(f"Could not create analytics index for {table_name}: {e}")
 
 
 async def _get_db_info(conn, database_id: str):
@@ -1267,60 +1246,40 @@ async def query_logs(database_id: str, query: LogQuery):
         
         table_name = db_info['table_name']
         columns = json.loads(db_info['columns_info'] or '[]')
-        display_columns = [c for c in columns if not c.startswith('_')]
-
-        # Detectar si la tabla tiene índice GIN (tablas nuevas post-optimización)
-        has_search_col = await conn.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name='_search_text')",
-            table_name
-        )
-
+        
         conditions, params = [], []
-
+        
         if query.message_id:
             conditions.append(f"message_id = ${len(params) + 1}")
             params.append(query.message_id)
-
+        
         if query.search:
-            if has_search_col:
-                # Búsqueda rápida via índice GIN trigramas
-                conditions.append(f"_search_text ILIKE ${len(params) + 1}")
-            else:
-                # Fallback para tablas antiguas: ILIKE en todas las columnas
-                text_cols = columns[2:]
-                search_conds = [f"{col}::text ILIKE ${len(params) + 1}" for col in text_cols]
-                if search_conds:
-                    conditions.append(f"({' OR '.join(search_conds)})")
-            params.append(f"%{query.search}%")
-
+            text_cols = columns[2:]  # Todas las columnas de texto (excluye timestamp y message_id)
+            search_conds = [f"{col}::text ILIKE ${len(params) + 1}" for col in text_cols]
+            if search_conds:
+                conditions.append(f"({' OR '.join(search_conds)})")
+                params.append(f"%{query.search}%")
+        
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-        # COUNT: aproximado O(1) sin filtros, exacto cuando hay filtro activo
-        if not conditions:
-            total_records = max(0, await conn.fetchval(
-                "SELECT reltuples::bigint FROM pg_class WHERE relname=$1", table_name
-            ) or 0)
-        else:
-            total_records = await conn.fetchval(
-                f"SELECT COUNT(*) FROM {table_name} {where_clause}", *params
-            )
-
+        
+        total_records = await conn.fetchval(f"SELECT COUNT(*) FROM {table_name} {where_clause}", *params)
+        
         offset = (query.page - 1) * query.limit
         rows = await conn.fetch(f"""
             SELECT * FROM {table_name} {where_clause}
             ORDER BY timestamp ASC LIMIT {query.limit} OFFSET {offset}
         """, *params)
-
-        data = [{k: v.isoformat() if isinstance(v, datetime) else v
-                 for k, v in row.items() if k not in ('id', '_search_text')} for row in rows]
-
+        
+        data = [{k: v.isoformat() if isinstance(v, datetime) else v 
+                for k, v in row.items() if k != "id"} for row in rows]
+        
         return LogResponse(
             data=data,
             total_records=total_records,
             page=query.page,
             total_pages=(total_records + query.limit - 1) // query.limit,
             processing_time=time.time() - start_time,
-            columns=display_columns
+            columns=columns
         )
 
 @app.get("/table/{table_name}/stats")
