@@ -392,12 +392,17 @@ class UltraSchema:
             return None
 
     def get_create_table_sql(self, table_name: str) -> str:
-        """SQL para crear tabla (sin índices — se crean después del COPY para mayor velocidad)"""
+        """SQL para crear tabla con índices básicos antes del COPY.
+        message_id (baja cardinalidad) y timestamp (monotóno) son baratos de mantener inline."""
         safe_name = _safe_sql_name(table_name)
         column_defs = ["id BIGSERIAL PRIMARY KEY"]
         for col_name, col_type in self.columns:
             column_defs.append(f"{col_name} {col_type}")
-        return f"CREATE TABLE {safe_name} ({', '.join(column_defs)})"
+        return (
+            f"CREATE TABLE {safe_name} ({', '.join(column_defs)}); "
+            f"CREATE INDEX idx_{safe_name}_msgid ON {safe_name}(message_id); "
+            f"CREATE INDEX idx_{safe_name}_ts ON {safe_name}(timestamp)"
+        )
 
 
 class SCNETSchemaOptimized:
@@ -677,12 +682,17 @@ class SCNETSchemaOptimized:
             return None
 
     def get_create_table_sql(self, table_name: str) -> str:
-        """SQL para crear tabla SCNET (sin índices — se crean después del COPY para mayor velocidad)"""
+        """SQL para crear tabla SCNET con índices básicos antes del COPY.
+        message_id (baja cardinalidad) y timestamp (monotóno) son baratos de mantener inline."""
         safe_name = _safe_sql_name(table_name)
         column_defs = ["id BIGSERIAL PRIMARY KEY"]
         for col_name, col_type in self.columns:
             column_defs.append(f"{col_name} {col_type}")
-        return f"CREATE TABLE {safe_name} ({', '.join(column_defs)})"
+        return (
+            f"CREATE TABLE {safe_name} ({', '.join(column_defs)}); "
+            f"CREATE INDEX idx_{safe_name}_msgid ON {safe_name}(message_id); "
+            f"CREATE INDEX idx_{safe_name}_ts ON {safe_name}(timestamp)"
+        )
 
 # Database functions
 async def get_db_pool():
@@ -1052,19 +1062,11 @@ async def _build_gin_index(pool, safe_table: str, table_name: str):
 
 
 async def create_analytics_indexes(pool, table_name: str, column_names: List[str]):
-    """Crea todos los índices DESPUÉS del COPY completo (mucho más rápido que durante la ingesta).
-    Orden: msgid + ts (bloqueantes, necesarios para analytics) → composite analytics → GIN (background)."""
+    """ANALYZE + índice compuesto para analytics + índice GIN para búsqueda de texto.
+    Los índices básicos (msgid, ts) ya existen: se crean antes del COPY en get_create_table_sql."""
     safe_table = _safe_sql_name(table_name)
 
     async with pool.acquire() as conn:
-        # Índices básicos de navegación — creados aquí, no en CREATE TABLE, para no ralentizar el COPY
-        try:
-            await conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{safe_table[:50]}_msgid ON {safe_table}(message_id)")
-            await conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{safe_table[:50]}_ts ON {safe_table}(timestamp)")
-            logger.info(f"Base indexes created for {table_name}")
-        except Exception as e:
-            logger.warning(f"Could not create base indexes for {table_name}: {e}")
-
         # ANALYZE: da al planner estadísticas reales tras el COPY masivo
         try:
             await conn.execute(f"ANALYZE {safe_table}")
